@@ -22,7 +22,7 @@ const secondaryNavItems = [
 
 const level0NavItems = [
   { id: "my-cpgs", label: "My CPGs", icon: Library, href: "/my-cpgs" },
-  { id: "browse", label: "Calalog", icon: BookOpen, href: "/browse" },
+  { id: "catalog", label: "Calalog", icon: BookOpen, href: "/catalog" },
 ]
 
 export function NavRail({ selectedCPG }: NavRailProps) {
