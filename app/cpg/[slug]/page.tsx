@@ -159,12 +159,17 @@ export default function TrainingPage() {
   const totalCount = modules.length;
 
   useEffect(() => {
+    // Format the CPG name nicely (capitalize each word)
+    const formattedName = slug
+      .split('-')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+
     setBreadcrumbs([
       { label: 'My CPGs', href: '/my-cpgs' },
-      { label: displayName, href: `/cpg/${slug}` },
-      { label: 'Training' },
+      { label: `${formattedName} - Training` }, // Combined, no href = not clickable
     ]);
-  }, [displayName, slug, setBreadcrumbs]);
+  }, [slug, setBreadcrumbs]);
 
   return (
     <div className="mx-auto max-w-3xl">
