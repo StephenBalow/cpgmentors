@@ -1,12 +1,30 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { Check, Clock, Play } from 'lucide-react';
+import { Check, Clock, Play, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useBreadcrumbs } from '@/components/breadcrumb-context';
+import { createClient } from '@/lib/supabase/client';
 
+// Database row type (matches patient_cases table)
+interface PatientCaseRow {
+  id: string;
+  name: string;
+  age: number;
+  occupation: string | null;
+  chief_complaint: string;
+  duration: string | null;
+  onset_type: string | null;
+  mechanism_of_injury: string | null;
+  difficulty_level: string | null;
+  estimated_minutes: number | null;
+  display_order: number | null;
+  display_hints: string[] | null;
+}
+
+// UI display type (what the card needs)
 interface PatientCase {
   id: string;
   name: string;
@@ -19,74 +37,43 @@ interface PatientCase {
   duration: string;
 }
 
-const patientCases: PatientCase[] = [
-  {
-    id: 'sarah-martinez',
-    name: 'Sarah Martinez',
-    age: 45,
-    avatar: 'SM',
-    complaint: "I can't check my blind spot when backing up my car",
-    hints: ['3 weeks duration', 'No trauma', 'Office worker'],
-    difficulty: 'Beginner',
-    status: 'Completed',
-    duration: '15-20 min',
-  },
-  {
-    id: 'michael-chen',
-    name: 'Michael Chen',
-    age: 62,
-    avatar: 'MC',
-    complaint: 'My neck is so stiff every morning, it takes hours to loosen up',
-    hints: ['6 months duration', 'Gradual onset', 'Retired teacher'],
-    difficulty: 'Intermediate',
-    status: 'In Progress',
-    duration: '20-25 min',
-  },
-  {
-    id: 'emma-thompson',
-    name: 'Emma Thompson',
-    age: 28,
-    avatar: 'ET',
-    complaint: "Ever since the car accident, my neck hasn't been the same",
-    hints: ['Post-MVA', '2 weeks ago', 'Whiplash mechanism'],
-    difficulty: 'Advanced',
-    status: 'Not Started',
-    duration: '25-30 min',
-  },
-  {
-    id: 'robert-williams',
-    name: 'Robert Williams',
-    age: 55,
-    avatar: 'RW',
-    complaint: 'The pain shoots down my arm when I look up',
-    hints: ['Radiating symptoms', 'Numbness in fingers', 'Construction worker'],
-    difficulty: 'Intermediate',
-    status: 'Not Started',
-    duration: '20-25 min',
-  },
-  {
-    id: 'lisa-anderson',
-    name: 'Lisa Anderson',
-    age: 38,
-    avatar: 'LA',
-    complaint: 'These headaches always start at the base of my skull',
-    hints: ['Cervicogenic pattern', 'Desk job', 'No visual changes'],
-    difficulty: 'Beginner',
-    status: 'Not Started',
-    duration: '15-20 min',
-  },
-  {
-    id: 'james-cooper',
-    name: 'James Cooper',
-    age: 71,
-    avatar: 'JC',
-    complaint: "I've had this neck pain for years, nothing seems to help",
-    hints: ['Chronic pain', 'Multiple treatments tried', 'Retired'],
-    difficulty: 'Advanced',
-    status: 'Not Started',
-    duration: '25-30 min',
-  },
-];
+// Transform database row to UI display format
+function transformToPatientCase(row: PatientCaseRow): PatientCase {
+  // Generate avatar from initials
+  const nameParts = row.name.split(' ');
+  const avatar = nameParts.map(part => part.charAt(0).toUpperCase()).join('');
+
+  // Use display_hints from database (Ryan controls these)
+  const hints = row.display_hints || [];
+
+  // Format duration display
+  const minutes = row.estimated_minutes || 20;
+  const durationDisplay = minutes <= 20 
+    ? '15-20 min' 
+    : minutes <= 25 
+      ? '20-25 min' 
+      : '25-30 min';
+
+  // Map difficulty (with fallback)
+  const difficultyMap: Record<string, 'Beginner' | 'Intermediate' | 'Advanced'> = {
+    'Beginner': 'Beginner',
+    'Intermediate': 'Intermediate', 
+    'Advanced': 'Advanced',
+  };
+  const difficulty = difficultyMap[row.difficulty_level || 'Beginner'] || 'Beginner';
+
+  return {
+    id: row.id,
+    name: row.name,
+    age: row.age,
+    avatar,
+    complaint: row.chief_complaint,
+    hints,
+    difficulty,
+    status: 'Not Started', // TODO: Get from user progress table
+    duration: durationDisplay,
+  };
+}
 
 const difficultyColors = {
   Beginner: 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -191,19 +178,130 @@ export default function PracticePage() {
   const params = useParams();
   const slug = params.slug as string;
   const { setBreadcrumbs } = useBreadcrumbs();
+  
+  // State for patient cases
+  const [patientCases, setPatientCases] = useState<PatientCase[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Format CPG name
+  // Format CPG name from slug
   const cpgName = slug
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 
+  // Set breadcrumbs
   useEffect(() => {
     setBreadcrumbs([
       { label: 'My CPGs', href: '/my-cpgs' },
       { label: `${cpgName} - Practice` },
     ]);
   }, [cpgName, setBreadcrumbs]);
+
+  // Fetch patient cases from Supabase
+  useEffect(() => {
+    async function fetchPatientCases() {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        const supabase = createClient();
+        
+        const { data, error: fetchError } = await supabase
+          .from('patient_cases')
+          .select(`
+            id,
+            name,
+            age,
+            occupation,
+            chief_complaint,
+            duration,
+            onset_type,
+            mechanism_of_injury,
+            difficulty_level,
+            estimated_minutes,
+            display_order,
+            display_hints
+          `)
+          .eq('is_active', true)
+          .order('display_order', { ascending: true });
+
+        if (fetchError) {
+          throw fetchError;
+        }
+
+        // Transform database rows to UI format
+        const transformedCases = (data || []).map(transformToPatientCase);
+        setPatientCases(transformedCases);
+        
+      } catch (err) {
+        console.error('Error fetching patient cases:', err);
+        setError('Failed to load practice cases. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchPatientCases();
+  }, []);
+
+  // Loading state
+  if (loading) {
+    return (
+      <div className="mx-auto max-w-5xl">
+        <div className="mb-8">
+          <h1 className="text-2xl font-semibold text-foreground">
+            {cpgName} - Practice Cases
+          </h1>
+          <p className="mt-1 text-muted-foreground">
+            Apply the CPG to simulated patients
+          </p>
+        </div>
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <span className="ml-2 text-muted-foreground">Loading cases...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state
+  if (error) {
+    return (
+      <div className="mx-auto max-w-5xl">
+        <div className="mb-8">
+          <h1 className="text-2xl font-semibold text-foreground">
+            {cpgName} - Practice Cases
+          </h1>
+          <p className="mt-1 text-muted-foreground">
+            Apply the CPG to simulated patients
+          </p>
+        </div>
+        <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-center">
+          <p className="text-destructive">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Empty state
+  if (patientCases.length === 0) {
+    return (
+      <div className="mx-auto max-w-5xl">
+        <div className="mb-8">
+          <h1 className="text-2xl font-semibold text-foreground">
+            {cpgName} - Practice Cases
+          </h1>
+          <p className="mt-1 text-muted-foreground">
+            Apply the CPG to simulated patients
+          </p>
+        </div>
+        <div className="rounded-lg border border-border bg-muted/50 p-8 text-center">
+          <p className="text-muted-foreground">No practice cases available yet.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-5xl">

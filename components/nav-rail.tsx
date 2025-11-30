@@ -19,7 +19,7 @@ interface NavRailProps {
 }
 
 const primaryNavItems = [
-  { id: 'training', label: 'Training', icon: GraduationCap, href: '/training' },
+  { id: 'training', label: 'Training', icon: GraduationCap, href: '' },
   { id: 'practice', label: 'Practice', icon: Users, href: '/practice' },
   { id: 'testing', label: 'Testing', icon: ClipboardCheck, href: '/testing' },
 ];
@@ -92,22 +92,8 @@ export function NavRail({ selectedCPG }: NavRailProps) {
 
   // Level 1: Inside a CPG
   return (
-    <aside className="fixed left-0 top-[60px] z-40 flex h-[calc(100vh-60px)] w-[100px] flex-col border-r border-border bg-slate-50">
+   <aside className="fixed left-0 top-[60px] z-40 flex h-[calc(100vh-60px)] w-[100px] flex-col border-r border-border bg-slate-50">
       {/* CPG Selector */}
-      <div className="flex flex-col items-center px-2 py-3">
-        <Link
-          href={`/cpg/${cpgSlug}`}
-          className="flex w-full flex-col items-center gap-0.5 rounded-md px-1 py-2 text-center transition-colors hover:bg-slate-100"
-        >
-          <span className="line-clamp-2 text-[11px] font-medium leading-tight text-foreground">
-            {selectedCPG || cpgSlug?.replace(/-/g, ' ')}
-          </span>
-          <ChevronDown className="h-3 w-3 text-muted-foreground" />
-        </Link>
-      </div>
-
-      <div className="mx-2 h-px bg-border" />
-
       {/* Primary Navigation */}
       <nav className="flex flex-1 flex-col items-center gap-1 px-2 py-3">
         {primaryNavItems.map((item) => {
@@ -116,8 +102,9 @@ export function NavRail({ selectedCPG }: NavRailProps) {
           // Training is also active when on the CPG dashboard (which shows training modules)
           const isActive =
             item.id === 'training'
-              ? pathname === `/cpg/${cpgSlug}` || pathname.startsWith(fullHref)
-              : pathname.startsWith(fullHref);
+              ? pathname === `/cpg/${cpgSlug}` ||
+                pathname === `/cpg/${cpgSlug}/`
+              : pathname.startsWith(fullHref + '/') || pathname === fullHref;
           return (
             <Link
               key={item.id}
