@@ -90,7 +90,7 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
     setIsLoading(true);
     setError(null);
 
-    // Optimistically add user message to UI
+    // Create the user message
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -98,10 +98,15 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
       timestamp: new Date(),
     };
 
-//    setConversationState(prev => ({
-//      ...prev,
-//      messages: [...prev.messages, userMessage],
-//    }));
+    // Build the state with user message included
+    // This is what we send to the API
+    const stateWithUserMessage: ConversationState = {
+      ...conversationState,
+      messages: [...conversationState.messages, userMessage],
+    };
+
+    // Optimistically update UI with user message
+    setConversationState(stateWithUserMessage);
 
     try {
       const response = await fetch('/api/sam/chat', {
@@ -110,10 +115,7 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
         body: JSON.stringify({
           caseId,
           message,
-          conversationState: {
-            ...conversationState,
-            messages: [...conversationState.messages, userMessage],
-          },
+          conversationState: stateWithUserMessage,
           isFirstMessage: false,
         }),
       });
@@ -123,6 +125,7 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
       }
 
       const data = await response.json();
+      // API returns state with Sam's response added
       setConversationState(data.updatedState);
       
       if (data.resources) {
@@ -134,11 +137,8 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
       setError(errorMessage);
       onError?.(errorMessage);
       
-      // Remove optimistic user message on error
-      setConversationState(prev => ({
-        ...prev,
-        messages: prev.messages.filter(m => m.id !== userMessage.id),
-      }));
+      // Rollback: remove the user message on error
+      setConversationState(conversationState);
     } finally {
       setIsLoading(false);
     }

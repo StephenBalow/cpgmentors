@@ -1,10 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
-import { Send, Check, Circle, ArrowRight, ExternalLink, Loader2 } from 'lucide-react';
+import {
+  Send,
+  Check,
+  Circle,
+  ArrowRight,
+  ExternalLink,
+  Loader2,
+  X,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { useBreadcrumbs } from '@/components/breadcrumb-context';
 import { createClient } from '@/lib/supabase/client';
@@ -20,18 +28,15 @@ interface PatientCaseData {
   duration: string | null;
   onset_type: string | null;
   mechanism_of_injury: string | null;
+  aggravating_factors: string[] | null;
+  easing_factors: string[] | null;
+  relevant_history: string | null;
 }
 
 interface PathwayStepData {
   id: string;
   step_number: number;
   pathway_name: string;
-}
-
-interface PathwayStep {
-  id: string;
-  label: string;
-  status: 'completed' | 'current' | 'upcoming';
 }
 
 function SamAvatar() {
@@ -42,7 +47,13 @@ function SamAvatar() {
   );
 }
 
-function PatientCard({ patient }: { patient: PatientCaseData }) {
+function PatientCard({
+  patient,
+  onViewFullCase,
+}: {
+  patient: PatientCaseData;
+  onViewFullCase: () => void;
+}) {
   const avatar = patient.name
     .split(' ')
     .map((part) => part.charAt(0).toUpperCase())
@@ -72,10 +83,127 @@ function PatientCard({ patient }: { patient: PatientCaseData }) {
         &quot;{patient.chief_complaint}&quot;
       </p>
       <p className="mt-2 text-xs text-muted-foreground">{keyFacts}</p>
-      <button className="mt-3 flex items-center gap-1 text-xs text-primary hover:underline">
+      <button
+        onClick={onViewFullCase}
+        className="mt-3 flex items-center gap-1 text-xs text-primary hover:underline"
+      >
         View full case
         <ExternalLink className="h-3 w-3" />
       </button>
+    </div>
+  );
+}
+
+function FullCaseModal({
+  patient,
+  onClose,
+}: {
+  patient: PatientCaseData;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="relative max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-card p-6 shadow-xl">
+        <button
+          onClick={onClose}
+          className="absolute right-4 top-4 rounded-full p-1 hover:bg-secondary"
+        >
+          <X className="h-5 w-5" />
+        </button>
+
+        <h2 className="mb-4 text-xl font-semibold">
+          {patient.name}, {patient.age}
+        </h2>
+
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-sm font-medium text-muted-foreground">
+              Chief Complaint
+            </h3>
+            <p className="mt-1 text-foreground">
+              &quot;{patient.chief_complaint}&quot;
+            </p>
+          </div>
+
+          {patient.occupation && (
+            <div>
+              <h3 className="text-sm font-medium text-muted-foreground">
+                Occupation
+              </h3>
+              <p className="mt-1 text-foreground">{patient.occupation}</p>
+            </div>
+          )}
+
+          {patient.duration && (
+            <div>
+              <h3 className="text-sm font-medium text-muted-foreground">
+                Duration
+              </h3>
+              <p className="mt-1 text-foreground">{patient.duration}</p>
+            </div>
+          )}
+
+          {patient.onset_type && (
+            <div>
+              <h3 className="text-sm font-medium text-muted-foreground">
+                Onset
+              </h3>
+              <p className="mt-1 text-foreground">{patient.onset_type}</p>
+            </div>
+          )}
+
+          {patient.mechanism_of_injury && (
+            <div>
+              <h3 className="text-sm font-medium text-muted-foreground">
+                Mechanism of Injury
+              </h3>
+              <p className="mt-1 text-foreground">
+                {patient.mechanism_of_injury}
+              </p>
+            </div>
+          )}
+
+          {patient.aggravating_factors &&
+            patient.aggravating_factors.length > 0 && (
+              <div>
+                <h3 className="text-sm font-medium text-muted-foreground">
+                  Aggravating Factors
+                </h3>
+                <ul className="mt-1 list-inside list-disc text-foreground">
+                  {patient.aggravating_factors.map((factor, i) => (
+                    <li key={i}>{factor}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+          {patient.easing_factors && patient.easing_factors.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium text-muted-foreground">
+                Easing Factors
+              </h3>
+              <ul className="mt-1 list-inside list-disc text-foreground">
+                {patient.easing_factors.map((factor, i) => (
+                  <li key={i}>{factor}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {patient.relevant_history && (
+            <div>
+              <h3 className="text-sm font-medium text-muted-foreground">
+                Relevant History
+              </h3>
+              <p className="mt-1 text-foreground">{patient.relevant_history}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 flex justify-end">
+          <Button onClick={onClose}>Close</Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -89,7 +217,9 @@ function PathwayProgress({
   currentStep: number;
   completedSteps: number[];
 }) {
-  const getStatus = (stepNumber: number): 'completed' | 'current' | 'upcoming' => {
+  const getStatus = (
+    stepNumber: number
+  ): 'completed' | 'current' | 'upcoming' => {
     if (completedSteps.includes(stepNumber)) return 'completed';
     if (stepNumber === currentStep) return 'current';
     return 'upcoming';
@@ -105,7 +235,6 @@ function PathwayProgress({
           const status = getStatus(step.step_number);
           return (
             <div key={step.id} className="flex items-start gap-3">
-              {/* Connector line and icon */}
               <div className="flex flex-col items-center">
                 {status === 'completed' ? (
                   <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white">
@@ -120,7 +249,6 @@ function PathwayProgress({
                     <Circle className="h-2 w-2 text-muted-foreground/30" />
                   </div>
                 )}
-                {/* Vertical line connector */}
                 {index < steps.length - 1 && (
                   <div
                     className={cn(
@@ -132,7 +260,6 @@ function PathwayProgress({
                   />
                 )}
               </div>
-              {/* Step label */}
               <span
                 className={cn(
                   'pt-0.5 text-sm',
@@ -159,11 +286,16 @@ export default function PracticeConversationPage() {
   const caseId = params.case as string;
   const { setBreadcrumbs } = useBreadcrumbs();
 
+  // Refs for auto-scroll
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
   // Patient and pathway data from database
   const [patientCase, setPatientCase] = useState<PatientCaseData | null>(null);
   const [pathwaySteps, setPathwaySteps] = useState<PathwayStepData[]>([]);
   const [loading, setLoading] = useState(true);
   const [inputValue, setInputValue] = useState('');
+  const [showFullCase, setShowFullCase] = useState(false);
 
   // Sam conversation hook
   const {
@@ -185,16 +317,29 @@ export default function PracticeConversationPage() {
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isSamLoading]);
+
   // Fetch patient case and pathway steps
   useEffect(() => {
     async function fetchData() {
       try {
         const supabase = createClient();
 
-        // Fetch patient case
+        // Fetch patient case with all fields for the modal
         const { data: caseData, error: caseError } = await supabase
           .from('patient_cases')
-          .select('id, name, age, occupation, chief_complaint, duration, onset_type, mechanism_of_injury, cpg_id')
+          .select(
+            `
+            id, name, age, occupation, chief_complaint, duration, 
+            onset_type, mechanism_of_injury, aggravating_factors,
+            easing_factors, relevant_history, cpg_id
+          `
+          )
           .eq('id', caseId)
           .single();
 
@@ -225,7 +370,12 @@ export default function PracticeConversationPage() {
 
   // Start conversation when data is loaded
   useEffect(() => {
-    if (!loading && patientCase && pathwaySteps.length > 0 && messages.length === 0) {
+    if (
+      !loading &&
+      patientCase &&
+      pathwaySteps.length > 0 &&
+      messages.length === 0
+    ) {
       startConversation();
     }
   }, [loading, patientCase, pathwaySteps, messages.length, startConversation]);
@@ -249,12 +399,14 @@ export default function PracticeConversationPage() {
     await sendMessage(message);
   };
 
-  // Handle Enter key
+  // Handle keyboard shortcuts
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Send on Enter (without Shift)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
+    // Allow Shift+Enter for new line (default textarea behavior)
   };
 
   // Loading state
@@ -277,104 +429,124 @@ export default function PracticeConversationPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-60px)] gap-6 p-6">
-      {/* Conversation Area - Left 60% */}
-      <div className="flex w-[60%] flex-col rounded-lg border border-border bg-card">
-        {/* Messages Container */}
-        <div className="flex-1 overflow-y-auto p-6">
-          <div className="flex flex-col gap-5">
-            {messages.map((message) => (
-              <div key={message.id} className="flex flex-col">
-                <div
-                  className={`flex gap-3 ${
-                    message.role === 'user' ? 'flex-row-reverse' : ''
-                  }`}
-                >
-                  {message.role === 'assistant' && <SamAvatar />}
+    <>
+      <div className="flex h-[calc(100vh-60px)] gap-6 p-6">
+        {/* Conversation Area - Left 60% */}
+        <div className="flex w-[60%] flex-col rounded-lg border border-border bg-card">
+          {/* Messages Container */}
+          <div
+            ref={messagesContainerRef}
+            className="flex-1 overflow-y-auto p-6"
+          >
+            <div className="flex flex-col gap-5">
+              {messages.map((message) => (
+                <div key={message.id} className="flex flex-col">
                   <div
-                    className={`max-w-[85%] rounded-lg px-4 py-3 ${
-                      message.role === 'assistant'
-                        ? 'bg-secondary text-secondary-foreground'
-                        : 'border-2 border-primary/20 bg-card text-foreground'
+                    className={`flex gap-3 ${
+                      message.role === 'user' ? 'flex-row-reverse' : ''
                     }`}
                   >
-                    {message.role === 'assistant' && (
-                      <p className="mb-1 text-xs font-medium text-primary">
-                        Sam
+                    {message.role === 'assistant' && <SamAvatar />}
+                    <div
+                      className={`max-w-[85%] rounded-lg px-4 py-3 ${
+                        message.role === 'assistant'
+                          ? 'bg-secondary text-secondary-foreground'
+                          : 'border-2 border-primary/20 bg-card text-foreground'
+                      }`}
+                    >
+                      {message.role === 'assistant' && (
+                        <p className="mb-1 text-xs font-medium text-primary">
+                          Sam
+                        </p>
+                      )}
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                        {message.content}
                       </p>
-                    )}
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                      {message.content}
-                    </p>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))}
 
-            {/* Loading indicator when Sam is thinking */}
-            {isSamLoading && (
-              <div className="flex gap-3">
-                <SamAvatar />
-                <div className="flex items-center gap-2 rounded-lg bg-secondary px-4 py-3">
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span className="text-sm text-muted-foreground">
-                    Sam is thinking...
-                  </span>
+              {/* Loading indicator when Sam is thinking */}
+              {isSamLoading && (
+                <div className="flex gap-3">
+                  <SamAvatar />
+                  <div className="flex items-center gap-2 rounded-lg bg-secondary px-4 py-3">
+                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                    <span className="text-sm text-muted-foreground">
+                      Sam is thinking...
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {/* Error display */}
-            {samError && (
-              <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-                Error: {samError}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Input Area */}
-        <div className="border-t border-border p-4">
-          <div className="flex gap-3">
-            <Input
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type your response..."
-              className="flex-1"
-              disabled={isSamLoading}
-            />
-            <Button 
-              size="icon" 
-              className="shrink-0"
-              onClick={handleSend}
-              disabled={isSamLoading || !inputValue.trim()}
-            >
-              {isSamLoading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
               )}
-              <span className="sr-only">Send message</span>
-            </Button>
+
+              {/* Error display */}
+              {samError && (
+                <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+                  Error: {samError}
+                </div>
+              )}
+
+              {/* Scroll anchor */}
+              <div ref={messagesEndRef} />
+            </div>
           </div>
+
+          {/* Input Area */}
+          <div className="border-t border-border p-4">
+            <div className="flex gap-3">
+              <Textarea
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Type your response... (Shift+Enter for new line)"
+                className="min-h-[44px] max-h-[160px] flex-1 resize-y"
+                rows={2}
+                disabled={isSamLoading}
+              />
+              <Button
+                size="icon"
+                className="shrink-0 self-end"
+                onClick={handleSend}
+                disabled={isSamLoading || !inputValue.trim()}
+              >
+                {isSamLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+                <span className="sr-only">Send message</span>
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Context Panel - Right 40% */}
+        <div className="flex w-[40%] flex-col gap-4 overflow-y-auto">
+          {/* Patient Card */}
+          <PatientCard
+            patient={patientCase}
+            onViewFullCase={() => setShowFullCase(true)}
+          />
+
+          {/* Pathway Progress */}
+          {pathwaySteps.length > 0 && (
+            <PathwayProgress
+              steps={pathwaySteps}
+              currentStep={currentStep}
+              completedSteps={completedSteps}
+            />
+          )}
         </div>
       </div>
 
-      {/* Context Panel - Right 40% */}
-      <div className="flex w-[40%] flex-col gap-4 overflow-y-auto">
-        {/* Patient Card */}
-        <PatientCard patient={patientCase} />
-
-        {/* Pathway Progress */}
-        {pathwaySteps.length > 0 && (
-          <PathwayProgress
-            steps={pathwaySteps}
-            currentStep={currentStep}
-            completedSteps={completedSteps}
-          />
-        )}
-      </div>
-    </div>
+      {/* Full Case Modal */}
+      {showFullCase && (
+        <FullCaseModal
+          patient={patientCase}
+          onClose={() => setShowFullCase(false)}
+        />
+      )}
+    </>
   );
 }

@@ -23,6 +23,7 @@ import {
   type ExternalResource,
   type ConversationState,
   type SamContext,
+  type Message,
 } from '@/lib/sam/system-prompt';
 
 // Initialize Anthropic client
@@ -196,16 +197,9 @@ export async function POST(request: NextRequest) {
 
     const userPrompt = buildSamPrompt(context);
 
-    // Add the user's message to history before calling API
-    const messagesWithUser = [
-      ...conversationState.messages,
-      {
-        id: crypto.randomUUID(),
-        role: 'user' as const,
-        content: message,
-        timestamp: new Date(),
-      },
-    ];
+    // The conversationState.messages already includes the user's message
+    // (added by use-sam.ts before calling this API)
+    // So we use it directly without adding again
 
     // Call Claude API
     const response = await anthropic.messages.create({
@@ -229,9 +223,9 @@ export async function POST(request: NextRequest) {
     // UPDATE CONVERSATION STATE
     // ---------------------------------------------------------------------
 
-    // Add Sam's response to history
-    const updatedMessages = [
-      ...messagesWithUser,
+    // Add ONLY Sam's response to history (user message is already there from use-sam.ts)
+    const updatedMessages: Message[] = [
+      ...conversationState.messages,
       {
         id: crypto.randomUUID(),
         role: 'assistant' as const,
@@ -241,21 +235,36 @@ export async function POST(request: NextRequest) {
     ];
 
     // Determine if we should advance to next step
-    // (This is a simple heuristic - could be made smarter)
+    // Check for phrases that indicate step completion
+    const lowerResponse = samResponse.toLowerCase();
     const shouldAdvanceStep = 
-      samResponse.toLowerCase().includes("let's move on") ||
-      samResponse.toLowerCase().includes("now let's") ||
-      samResponse.toLowerCase().includes("next step") ||
-      samResponse.toLowerCase().includes("proceed to");
+      lowerResponse.includes("let's move") ||
+      lowerResponse.includes("now let's") ||
+      lowerResponse.includes("let's move on") ||
+      lowerResponse.includes("move to classification") ||
+      lowerResponse.includes("move to stage") ||
+      lowerResponse.includes("move to treatment") ||
+      lowerResponse.includes("proceed to") ||
+      lowerResponse.includes("next step") ||
+      (lowerResponse.includes("now let") && lowerResponse.includes("classify")) ||
+      (lowerResponse.includes("now let") && lowerResponse.includes("determine the stage")) ||
+      (lowerResponse.includes("now let") && lowerResponse.includes("treatment")) ||
+      (lowerResponse.includes("ready to see what the evidence tells us"));
+
+    // Update step tracking
+    const newCurrentStep = shouldAdvanceStep && conversationState.currentStepNumber < pathwaySteps.length
+      ? conversationState.currentStepNumber + 1
+      : conversationState.currentStepNumber;
+    
+    const newCompletedSteps = shouldAdvanceStep && conversationState.currentStepNumber < pathwaySteps.length
+      ? [...conversationState.completedSteps, conversationState.currentStepNumber]
+      : [...conversationState.completedSteps];
 
     const updatedState: ConversationState = {
       ...conversationState,
-      currentStepNumber: shouldAdvanceStep 
-        ? Math.min(conversationState.currentStepNumber + 1, pathwaySteps.length)
-        : conversationState.currentStepNumber,
-      completedSteps: shouldAdvanceStep
-        ? [...conversationState.completedSteps, conversationState.currentStepNumber]
-        : conversationState.completedSteps,
+      currentStepNumber: newCurrentStep,
+      completedSteps: newCompletedSteps,
+      totalSteps: pathwaySteps.length,
       messages: updatedMessages,
     };
 
@@ -264,6 +273,7 @@ export async function POST(request: NextRequest) {
       step: currentStep.pathway_name,
       messageLength: samResponse.length,
       shouldAdvanceStep,
+      newCurrentStep,
     });
 
     return NextResponse.json({
