@@ -2,25 +2,30 @@
 
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { Send, Check, Circle, ArrowRight, ExternalLink } from 'lucide-react';
+import { Send, Check, Circle, ArrowRight, ExternalLink, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useBreadcrumbs } from '@/components/breadcrumb-context';
+import { createClient } from '@/lib/supabase/client';
+import { useSam } from '@/lib/sam/use-sam';
 
-interface Message {
+// Types for patient data from database
+interface PatientCaseData {
   id: string;
-  sender: 'sam' | 'user';
-  content: string;
-  options?: string[];
-}
-
-interface PatientInfo {
   name: string;
   age: number;
-  avatar: string;
-  complaint: string;
-  keyFacts: string;
+  occupation: string | null;
+  chief_complaint: string;
+  duration: string | null;
+  onset_type: string | null;
+  mechanism_of_injury: string | null;
+}
+
+interface PathwayStepData {
+  id: string;
+  step_number: number;
+  pathway_name: string;
 }
 
 interface PathwayStep {
@@ -28,48 +33,6 @@ interface PathwayStep {
   label: string;
   status: 'completed' | 'current' | 'upcoming';
 }
-
-const initialMessages: Message[] = [
-  {
-    id: '1',
-    sender: 'sam',
-    content:
-      "Let's work through Sarah's case together. She's 45, an office worker presenting with \"I can't check my blind spot when backing up my car.\" Symptoms started 3 weeks ago with no trauma. Before we classify her neck pain, we need to screen for red flags. Based on her presentation, are there any red flags present?",
-  },
-  {
-    id: '2',
-    sender: 'user',
-    content:
-      'No history of trauma, no red flags that I can see from the initial presentation',
-  },
-  {
-    id: '3',
-    sender: 'sam',
-    content:
-      "Good clinical thinking! No immediate red flags. Now let's classify her neck pain. Based on her limited rotation and occupation, which classification fits best?",
-    options: [
-      'Neck pain with mobility deficits',
-      'Neck pain with movement coordination impairments (WAD)',
-      'Neck pain with headaches',
-      'Neck pain with radiating pain',
-    ],
-  },
-];
-
-const patientInfo: PatientInfo = {
-  name: 'Sarah Martinez',
-  age: 45,
-  avatar: 'SM',
-  complaint: "I can't check my blind spot when backing up my car",
-  keyFacts: '3 weeks • No trauma • Office worker',
-};
-
-const pathwaySteps: PathwayStep[] = [
-  { id: '1', label: 'Red Flag Screening', status: 'completed' },
-  { id: '2', label: 'Classification', status: 'current' },
-  { id: '3', label: 'Stage Determination', status: 'upcoming' },
-  { id: '4', label: 'Recommendations', status: 'upcoming' },
-];
 
 function SamAvatar() {
   return (
@@ -79,53 +42,25 @@ function SamAvatar() {
   );
 }
 
-function MultipleChoiceOptions({
-  options,
-  selectedOption,
-  onSelect,
-}: {
-  options: string[];
-  selectedOption: string | null;
-  onSelect: (option: string) => void;
-}) {
-  return (
-    <div className="mt-4 flex flex-col gap-2">
-      {options.map((option) => (
-        <button
-          key={option}
-          onClick={() => onSelect(option)}
-          className={cn(
-            'flex items-center gap-3 rounded-lg border px-4 py-3 text-left text-sm transition-all',
-            selectedOption === option
-              ? 'border-primary bg-primary/5 text-foreground'
-              : 'border-border bg-card text-foreground hover:border-primary/30 hover:bg-secondary/50'
-          )}
-        >
-          <div
-            className={cn(
-              'flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
-              selectedOption === option
-                ? 'border-primary bg-primary'
-                : 'border-muted-foreground/30'
-            )}
-          >
-            {selectedOption === option && (
-              <Check className="h-3 w-3 text-primary-foreground" />
-            )}
-          </div>
-          {option}
-        </button>
-      ))}
-    </div>
-  );
-}
+function PatientCard({ patient }: { patient: PatientCaseData }) {
+  const avatar = patient.name
+    .split(' ')
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('');
 
-function PatientCard({ patient }: { patient: PatientInfo }) {
+  const keyFacts = [
+    patient.duration,
+    patient.mechanism_of_injury ? 'Trauma' : 'No trauma',
+    patient.occupation,
+  ]
+    .filter(Boolean)
+    .join(' • ');
+
   return (
     <div className="rounded-lg border border-border bg-secondary/30 p-4">
       <div className="flex items-center gap-3">
         <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-primary/10 text-sm font-semibold text-primary">
-          {patient.avatar}
+          {avatar}
         </div>
         <div>
           <h3 className="font-medium text-foreground">
@@ -134,9 +69,9 @@ function PatientCard({ patient }: { patient: PatientInfo }) {
         </div>
       </div>
       <p className="mt-3 text-sm italic text-foreground">
-        &quot;{patient.complaint}&quot;
+        &quot;{patient.chief_complaint}&quot;
       </p>
-      <p className="mt-2 text-xs text-muted-foreground">{patient.keyFacts}</p>
+      <p className="mt-2 text-xs text-muted-foreground">{keyFacts}</p>
       <button className="mt-3 flex items-center gap-1 text-xs text-primary hover:underline">
         View full case
         <ExternalLink className="h-3 w-3" />
@@ -145,57 +80,74 @@ function PatientCard({ patient }: { patient: PatientInfo }) {
   );
 }
 
-function PathwayProgress({ steps }: { steps: PathwayStep[] }) {
+function PathwayProgress({
+  steps,
+  currentStep,
+  completedSteps,
+}: {
+  steps: PathwayStepData[];
+  currentStep: number;
+  completedSteps: number[];
+}) {
+  const getStatus = (stepNumber: number): 'completed' | 'current' | 'upcoming' => {
+    if (completedSteps.includes(stepNumber)) return 'completed';
+    if (stepNumber === currentStep) return 'current';
+    return 'upcoming';
+  };
+
   return (
     <div className="rounded-lg border border-border bg-secondary/30 p-4">
       <h3 className="mb-4 text-sm font-medium text-foreground">
         Pathway Progress
       </h3>
       <div className="flex flex-col gap-0">
-        {steps.map((step, index) => (
-          <div key={step.id} className="flex items-start gap-3">
-            {/* Connector line and icon */}
-            <div className="flex flex-col items-center">
-              {step.status === 'completed' ? (
-                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white">
-                  <Check className="h-3.5 w-3.5" />
-                </div>
-              ) : step.status === 'current' ? (
-                <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-primary bg-primary/10">
-                  <ArrowRight className="h-3.5 w-3.5 text-primary" />
-                </div>
-              ) : (
-                <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-muted-foreground/30">
-                  <Circle className="h-2 w-2 text-muted-foreground/30" />
-                </div>
-              )}
-              {/* Vertical line connector */}
-              {index < steps.length - 1 && (
-                <div
-                  className={cn(
-                    'h-6 w-0.5',
-                    step.status === 'completed'
-                      ? 'bg-emerald-500'
-                      : 'bg-muted-foreground/20'
-                  )}
-                />
-              )}
+        {steps.map((step, index) => {
+          const status = getStatus(step.step_number);
+          return (
+            <div key={step.id} className="flex items-start gap-3">
+              {/* Connector line and icon */}
+              <div className="flex flex-col items-center">
+                {status === 'completed' ? (
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white">
+                    <Check className="h-3.5 w-3.5" />
+                  </div>
+                ) : status === 'current' ? (
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-primary bg-primary/10">
+                    <ArrowRight className="h-3.5 w-3.5 text-primary" />
+                  </div>
+                ) : (
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-muted-foreground/30">
+                    <Circle className="h-2 w-2 text-muted-foreground/30" />
+                  </div>
+                )}
+                {/* Vertical line connector */}
+                {index < steps.length - 1 && (
+                  <div
+                    className={cn(
+                      'h-6 w-0.5',
+                      status === 'completed'
+                        ? 'bg-emerald-500'
+                        : 'bg-muted-foreground/20'
+                    )}
+                  />
+                )}
+              </div>
+              {/* Step label */}
+              <span
+                className={cn(
+                  'pt-0.5 text-sm',
+                  status === 'completed'
+                    ? 'text-muted-foreground'
+                    : status === 'current'
+                    ? 'font-medium text-primary'
+                    : 'text-muted-foreground/60'
+                )}
+              >
+                {step.pathway_name}
+              </span>
             </div>
-            {/* Step label */}
-            <span
-              className={cn(
-                'pt-0.5 text-sm',
-                step.status === 'completed'
-                  ? 'text-muted-foreground'
-                  : step.status === 'current'
-                  ? 'font-medium text-primary'
-                  : 'text-muted-foreground/60'
-              )}
-            >
-              {step.label}
-            </span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -207,28 +159,122 @@ export default function PracticeConversationPage() {
   const caseId = params.case as string;
   const { setBreadcrumbs } = useBreadcrumbs();
 
-  const [messages] = useState<Message[]>(initialMessages);
+  // Patient and pathway data from database
+  const [patientCase, setPatientCase] = useState<PatientCaseData | null>(null);
+  const [pathwaySteps, setPathwaySteps] = useState<PathwayStepData[]>([]);
+  const [loading, setLoading] = useState(true);
   const [inputValue, setInputValue] = useState('');
-  const [selectedOption, setSelectedOption] = useState<string | null>(null);
 
-  // Format names for display
+  // Sam conversation hook
+  const {
+    messages,
+    isLoading: isSamLoading,
+    error: samError,
+    currentStep,
+    completedSteps,
+    startConversation,
+    sendMessage,
+  } = useSam({
+    caseId,
+    onError: (error) => console.error('Sam error:', error),
+  });
+
+  // Format CPG name from slug
   const cpgName = slug
     .split('-')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 
-  const patientName = caseId
-    .split('-')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
-
+  // Fetch patient case and pathway steps
   useEffect(() => {
-    setBreadcrumbs([
-      { label: 'My CPGs', href: '/my-cpgs' },
-      { label: `${cpgName} - Practice`, href: `/cpg/${slug}/practice` },
-      { label: patientName },
-    ]);
-  }, [cpgName, patientName, slug, setBreadcrumbs]);
+    async function fetchData() {
+      try {
+        const supabase = createClient();
+
+        // Fetch patient case
+        const { data: caseData, error: caseError } = await supabase
+          .from('patient_cases')
+          .select('id, name, age, occupation, chief_complaint, duration, onset_type, mechanism_of_injury, cpg_id')
+          .eq('id', caseId)
+          .single();
+
+        if (caseError) throw caseError;
+        setPatientCase(caseData);
+
+        // Fetch pathway steps for this CPG
+        if (caseData?.cpg_id) {
+          const { data: stepsData, error: stepsError } = await supabase
+            .from('cpg_decision_pathways')
+            .select('id, step_number, pathway_name')
+            .eq('cpg_id', caseData.cpg_id)
+            .order('step_number', { ascending: true });
+
+          if (stepsError) throw stepsError;
+          setPathwaySteps(stepsData || []);
+        }
+
+        setLoading(false);
+      } catch (err) {
+        console.error('Error fetching data:', err);
+        setLoading(false);
+      }
+    }
+
+    fetchData();
+  }, [caseId]);
+
+  // Start conversation when data is loaded
+  useEffect(() => {
+    if (!loading && patientCase && pathwaySteps.length > 0 && messages.length === 0) {
+      startConversation();
+    }
+  }, [loading, patientCase, pathwaySteps, messages.length, startConversation]);
+
+  // Set breadcrumbs
+  useEffect(() => {
+    if (patientCase) {
+      setBreadcrumbs([
+        { label: 'My CPGs', href: '/my-cpgs' },
+        { label: `${cpgName} - Practice`, href: `/cpg/${slug}/practice` },
+        { label: patientCase.name },
+      ]);
+    }
+  }, [cpgName, patientCase, slug, setBreadcrumbs]);
+
+  // Handle sending a message
+  const handleSend = async () => {
+    if (!inputValue.trim() || isSamLoading) return;
+    const message = inputValue;
+    setInputValue('');
+    await sendMessage(message);
+  };
+
+  // Handle Enter key
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // Loading state
+  if (loading) {
+    return (
+      <div className="flex h-[calc(100vh-60px)] items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <span className="ml-2 text-muted-foreground">Loading case...</span>
+      </div>
+    );
+  }
+
+  // Error state
+  if (!patientCase) {
+    return (
+      <div className="flex h-[calc(100vh-60px)] items-center justify-center">
+        <p className="text-destructive">Patient case not found</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-[calc(100vh-60px)] gap-6 p-6">
@@ -241,37 +287,49 @@ export default function PracticeConversationPage() {
               <div key={message.id} className="flex flex-col">
                 <div
                   className={`flex gap-3 ${
-                    message.sender === 'user' ? 'flex-row-reverse' : ''
+                    message.role === 'user' ? 'flex-row-reverse' : ''
                   }`}
                 >
-                  {message.sender === 'sam' && <SamAvatar />}
+                  {message.role === 'assistant' && <SamAvatar />}
                   <div
                     className={`max-w-[85%] rounded-lg px-4 py-3 ${
-                      message.sender === 'sam'
+                      message.role === 'assistant'
                         ? 'bg-secondary text-secondary-foreground'
                         : 'border-2 border-primary/20 bg-card text-foreground'
                     }`}
                   >
-                    {message.sender === 'sam' && (
+                    {message.role === 'assistant' && (
                       <p className="mb-1 text-xs font-medium text-primary">
                         Sam
                       </p>
                     )}
-                    <p className="text-sm leading-relaxed">{message.content}</p>
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                      {message.content}
+                    </p>
                   </div>
                 </div>
-                {/* Multiple choice options below Sam's message */}
-                {message.sender === 'sam' && message.options && (
-                  <div className="ml-11">
-                    <MultipleChoiceOptions
-                      options={message.options}
-                      selectedOption={selectedOption}
-                      onSelect={setSelectedOption}
-                    />
-                  </div>
-                )}
               </div>
             ))}
+
+            {/* Loading indicator when Sam is thinking */}
+            {isSamLoading && (
+              <div className="flex gap-3">
+                <SamAvatar />
+                <div className="flex items-center gap-2 rounded-lg bg-secondary px-4 py-3">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  <span className="text-sm text-muted-foreground">
+                    Sam is thinking...
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Error display */}
+            {samError && (
+              <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+                Error: {samError}
+              </div>
+            )}
           </div>
         </div>
 
@@ -281,11 +339,22 @@ export default function PracticeConversationPage() {
             <Input
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
               placeholder="Type your response..."
               className="flex-1"
+              disabled={isSamLoading}
             />
-            <Button size="icon" className="shrink-0">
-              <Send className="h-4 w-4" />
+            <Button 
+              size="icon" 
+              className="shrink-0"
+              onClick={handleSend}
+              disabled={isSamLoading || !inputValue.trim()}
+            >
+              {isSamLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
               <span className="sr-only">Send message</span>
             </Button>
           </div>
@@ -295,10 +364,16 @@ export default function PracticeConversationPage() {
       {/* Context Panel - Right 40% */}
       <div className="flex w-[40%] flex-col gap-4 overflow-y-auto">
         {/* Patient Card */}
-        <PatientCard patient={patientInfo} />
+        <PatientCard patient={patientCase} />
 
         {/* Pathway Progress */}
-        <PathwayProgress steps={pathwaySteps} />
+        {pathwaySteps.length > 0 && (
+          <PathwayProgress
+            steps={pathwaySteps}
+            currentStep={currentStep}
+            completedSteps={completedSteps}
+          />
+        )}
       </div>
     </div>
   );
