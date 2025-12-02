@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import {
   Send,
@@ -10,6 +10,8 @@ import {
   ExternalLink,
   Loader2,
   X,
+  Play,
+  Video,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -37,6 +39,118 @@ interface PathwayStepData {
   id: string;
   step_number: number;
   pathway_name: string;
+}
+
+// Resource data for video player
+interface ResourceData {
+  id: string;
+  title: string;
+  video_url: string | null;
+  resource_type: string;
+}
+
+// Parse [RESOURCE:uuid] markers from message content
+function parseResourceMarkers(content: string): { cleanContent: string; resourceIds: string[] } {
+  const resourcePattern = /\[RESOURCE:([a-f0-9-]+)\]/gi;
+  const resourceIds: string[] = [];
+  
+  let match;
+  while ((match = resourcePattern.exec(content)) !== null) {
+    resourceIds.push(match[1]);
+  }
+  
+  // Remove the markers from displayed content
+  const cleanContent = content.replace(resourcePattern, '').trim();
+  
+  return { cleanContent, resourceIds };
+}
+
+// ============================================================================
+// FIXED: Extract Vimeo video ID AND privacy hash from URL
+// Handles: https://vimeo.com/787686635/f9a1e7d0a9
+//          Returns: { id: "787686635", hash: "f9a1e7d0a9" }
+// ============================================================================
+function getVimeoEmbedParams(url: string): { id: string; hash: string | null } | null {
+  // Match vimeo.com/NUMBERS optionally followed by /HASH
+  const match = url.match(/vimeo\.com\/(\d+)(?:\/([a-zA-Z0-9]+))?/);
+  if (!match) return null;
+  return { 
+    id: match[1], 
+    hash: match[2] || null 
+  };
+}
+
+// Video Player Component
+function VideoPlayer({ 
+  resource, 
+  onClose 
+}: { 
+  resource: ResourceData; 
+  onClose: () => void;
+}) {
+  const vimeoParams = resource.video_url ? getVimeoEmbedParams(resource.video_url) : null;
+  
+  if (!vimeoParams) {
+    return (
+      <div className="rounded-lg border border-border bg-secondary/50 p-4">
+        <p className="text-sm text-muted-foreground">Video not available</p>
+      </div>
+    );
+  }
+  
+  // Build embed URL with privacy hash if present
+  const embedUrl = vimeoParams.hash 
+    ? `https://player.vimeo.com/video/${vimeoParams.id}?h=${vimeoParams.hash}&badge=0&autopause=0&player_id=0&app_id=58479`
+    : `https://player.vimeo.com/video/${vimeoParams.id}?badge=0&autopause=0&player_id=0&app_id=58479`;
+  
+  return (
+    <div className="rounded-lg border border-border bg-card overflow-hidden">
+      {/* Video Header */}
+      <div className="flex items-center justify-between border-b border-border bg-secondary/30 px-4 py-2">
+        <div className="flex items-center gap-2">
+          <Video className="h-4 w-4 text-primary" />
+          <span className="text-sm font-medium text-foreground">{resource.title}</span>
+        </div>
+        <button
+          onClick={onClose}
+          className="rounded-full p-1 hover:bg-secondary"
+          aria-label="Close video"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      
+      {/* Vimeo Embed */}
+      <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+        <iframe
+          src={embedUrl}
+          frameBorder="0"
+          allow="autoplay; fullscreen; picture-in-picture; clipboard-write"
+          className="absolute top-0 left-0 w-full h-full"
+          title={resource.title}
+        />
+      </div>
+    </div>
+  );
+}
+
+// Video Offer Button (shown inline when Sam offers a video)
+function VideoOfferButton({
+  resource,
+  onPlay,
+}: {
+  resource: ResourceData;
+  onPlay: () => void;
+}) {
+  return (
+    <button
+      onClick={onPlay}
+      className="mt-3 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2 text-sm font-medium text-primary hover:bg-primary/10 transition-colors"
+    >
+      <Play className="h-4 w-4" />
+      Watch: {resource.title}
+    </button>
+  );
 }
 
 function SamAvatar() {
@@ -296,6 +410,10 @@ export default function PracticeConversationPage() {
   const [loading, setLoading] = useState(true);
   const [inputValue, setInputValue] = useState('');
   const [showFullCase, setShowFullCase] = useState(false);
+  
+  // Resource/Video state
+  const [resourceCache, setResourceCache] = useState<Record<string, ResourceData>>({});
+  const [activeVideo, setActiveVideo] = useState<ResourceData | null>(null);
 
   // Sam conversation hook
   const {
@@ -317,12 +435,59 @@ export default function PracticeConversationPage() {
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 
+  // Fetch resource data by ID (with caching)
+  const fetchResource = useCallback(async (resourceId: string): Promise<ResourceData | null> => {
+    // Check cache first
+    if (resourceCache[resourceId]) {
+      return resourceCache[resourceId];
+    }
+    
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase
+        .from('external_resources')
+        .select('id, title, video_url, resource_type')
+        .eq('id', resourceId)
+        .single();
+      
+      if (error || !data) {
+        console.error('Error fetching resource:', error);
+        return null;
+      }
+      
+      // Cache the result
+      setResourceCache(prev => ({ ...prev, [resourceId]: data }));
+      return data;
+    } catch (err) {
+      console.error('Error fetching resource:', err);
+      return null;
+    }
+  }, [resourceCache]);
+
+  // Fetch resources when messages contain resource markers
+  useEffect(() => {
+    async function fetchResourcesFromMessages() {
+      for (const message of messages) {
+        if (message.role === 'assistant') {
+          const { resourceIds } = parseResourceMarkers(message.content);
+          for (const resourceId of resourceIds) {
+            if (!resourceCache[resourceId]) {
+              await fetchResource(resourceId);
+            }
+          }
+        }
+      }
+    }
+    
+    fetchResourcesFromMessages();
+  }, [messages, resourceCache, fetchResource]);
+
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, isSamLoading]);
+  }, [messages, isSamLoading, activeVideo]);
 
   // Fetch patient case and pathway steps
   useEffect(() => {
@@ -409,6 +574,34 @@ export default function PracticeConversationPage() {
     // Allow Shift+Enter for new line (default textarea behavior)
   };
 
+  // Render a message with resource handling
+  const renderMessageContent = (content: string) => {
+    const { cleanContent, resourceIds } = parseResourceMarkers(content);
+    
+    return (
+      <>
+        <p className="text-sm leading-relaxed whitespace-pre-wrap">
+          {cleanContent}
+        </p>
+        
+        {/* Show video offer buttons for any resources in this message */}
+        {resourceIds.map(resourceId => {
+          const resource = resourceCache[resourceId];
+          if (resource && resource.video_url) {
+            return (
+              <VideoOfferButton
+                key={resourceId}
+                resource={resource}
+                onPlay={() => setActiveVideo(resource)}
+              />
+            );
+          }
+          return null;
+        })}
+      </>
+    );
+  };
+
   // Loading state
   if (loading) {
     return (
@@ -459,13 +652,24 @@ export default function PracticeConversationPage() {
                           Sam
                         </p>
                       )}
-                      <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                        {message.content}
-                      </p>
+                      {message.role === 'assistant' 
+                        ? renderMessageContent(message.content)
+                        : <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                      }
                     </div>
                   </div>
                 </div>
               ))}
+
+              {/* Active Video Player */}
+              {activeVideo && (
+                <div className="my-4">
+                  <VideoPlayer 
+                    resource={activeVideo} 
+                    onClose={() => setActiveVideo(null)} 
+                  />
+                </div>
+              )}
 
               {/* Loading indicator when Sam is thinking */}
               {isSamLoading && (

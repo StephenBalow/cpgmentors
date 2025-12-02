@@ -7,6 +7,9 @@
 // It fetches all necessary context from Supabase, builds the prompt,
 // and calls the Anthropic API.
 // =============================================================================
+// UPDATED: December 1, 2025 - Added Clinical Tests support for Classification step
+// UPDATED: December 1, 2025 - Fixed step transition detection for all 4 steps
+// =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
@@ -21,6 +24,7 @@ import {
   type PathwayOutcome,
   type Recommendation,
   type ExternalResource,
+  type ClinicalTest,
   type ConversationState,
   type SamContext,
   type Message,
@@ -112,6 +116,12 @@ export async function POST(request: NextRequest) {
       classifications = data || [];
     }
 
+    // 5b. Get clinical tests for this CPG (supports Classification step)
+    const { data: tests } = await supabase
+      .from('cpg_tests')
+      .select('*')
+      .eq('cpg_id', patientCase.cpg_id);
+
     // 6. Get stage options (outcomes for Step 3)
     const stageStep = pathwaySteps.find(s => s.step_number === 3);
     let stages: PathwayOutcome[] = [];
@@ -191,6 +201,7 @@ export async function POST(request: NextRequest) {
       stages,
       recommendations,
       resources,
+      tests: (tests || []) as ClinicalTest[],
       conversationState,
       userMessage: message,
     };
@@ -204,7 +215,7 @@ export async function POST(request: NextRequest) {
     // Call Claude API
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
+      max_tokens: 2500,
       system: SAM_SYSTEM_PROMPT,
       messages: [
         {
@@ -234,22 +245,61 @@ export async function POST(request: NextRequest) {
       },
     ];
 
-    // Determine if we should advance to next step
-    // Check for phrases that indicate step completion
+    // -------------------------------------------------------------------------
+    // DETERMINE IF WE SHOULD ADVANCE TO NEXT STEP
+    // -------------------------------------------------------------------------
+    // Each transition has specific trigger phrases based on how Sam actually talks
+    // -------------------------------------------------------------------------
+    
     const lowerResponse = samResponse.toLowerCase();
-    const shouldAdvanceStep = 
-      lowerResponse.includes("let's move") ||
-      lowerResponse.includes("now let's") ||
-      lowerResponse.includes("let's move on") ||
+
+    // Step 1 → 2: Red Flags complete, moving to Classification
+    const step1to2 = 
       lowerResponse.includes("move to classification") ||
+      lowerResponse.includes("proceed to classification") ||
+      lowerResponse.includes("now let's classify") ||
+      lowerResponse.includes("let's classify") ||
+      (lowerResponse.includes("no red flags") && lowerResponse.includes("which category")) ||
+      (lowerResponse.includes("appropriate for pt") && lowerResponse.includes("classif"));
+
+    // Step 2 → 3: Classification complete, moving to Stage
+    const step2to3 = 
       lowerResponse.includes("move to stage") ||
+      lowerResponse.includes("determine the stage") ||
+      lowerResponse.includes("acute, subacute, or chronic") ||
+      lowerResponse.includes("what stage would you") ||
+      lowerResponse.includes("classify sarah's condition as") ||
+      lowerResponse.includes("classify this as - acute") ||
+      lowerResponse.includes("classify her condition as") ||
+      lowerResponse.includes("classify his condition as") ||
+      (lowerResponse.includes("how long has") && lowerResponse.includes("symptom"));
+
+    // Step 3 → 4: Stage complete, moving to Recommendations
+    const step3to4 = 
       lowerResponse.includes("move to treatment") ||
-      lowerResponse.includes("proceed to") ||
-      lowerResponse.includes("next step") ||
-      (lowerResponse.includes("now let") && lowerResponse.includes("classify")) ||
-      (lowerResponse.includes("now let") && lowerResponse.includes("determine the stage")) ||
-      (lowerResponse.includes("now let") && lowerResponse.includes("treatment")) ||
-      (lowerResponse.includes("ready to see what the evidence tells us"));
+      lowerResponse.includes("move to recommendation") ||
+      lowerResponse.includes("evidence-based interventions") ||
+      lowerResponse.includes("what the research tells us") ||
+      lowerResponse.includes("treatment priorities") ||
+      lowerResponse.includes("what would you recommend") ||
+      lowerResponse.includes("final step in our clinical pathway") ||
+      (lowerResponse.includes("acute stage") && lowerResponse.includes("intervention"));
+
+    // Step 4 → Complete: Case finished
+    const step4complete = 
+      lowerResponse.includes("successfully navigated") ||
+      lowerResponse.includes("case summary") ||
+      lowerResponse.includes("try another case") ||
+      lowerResponse.includes("outstanding work! you've") ||
+      lowerResponse.includes("excellent clinical reasoning throughout");
+
+    // Generic transition phrases that work for any step
+    const genericTransition = 
+      lowerResponse.includes("move on to the next clinical decision") ||
+      lowerResponse.includes("ready to move on") ||
+      lowerResponse.includes("let's proceed to the next");
+
+    const shouldAdvanceStep = step1to2 || step2to3 || step3to4 || step4complete || genericTransition;
 
     // Update step tracking
     const newCurrentStep = shouldAdvanceStep && conversationState.currentStepNumber < pathwaySteps.length
@@ -268,12 +318,13 @@ export async function POST(request: NextRequest) {
       messages: updatedMessages,
     };
 
-    // Log for debugging
+    // Log for debugging - now includes which trigger fired
     console.log('Sam Response:', {
       step: currentStep.pathway_name,
       messageLength: samResponse.length,
       shouldAdvanceStep,
       newCurrentStep,
+      triggers: { step1to2, step2to3, step3to4, step4complete, genericTransition },
     });
 
     return NextResponse.json({
