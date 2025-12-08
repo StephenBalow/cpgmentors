@@ -13,6 +13,7 @@ import {
   Play,
   Video,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
@@ -580,9 +581,9 @@ export default function PracticeConversationPage() {
     
     return (
       <>
-        <p className="text-sm leading-relaxed whitespace-pre-wrap">
-          {cleanContent}
-        </p>
+        <div className="text-sm leading-relaxed [&_strong]:font-semibold [&_em]:italic [&_ul]:list-disc [&_ul]:ml-4 [&_ol]:list-decimal [&_ol]:ml-4 [&_p]:mb-2 [&_p:last-child]:mb-0 [&_li]:mb-1">
+          <ReactMarkdown>{cleanContent}</ReactMarkdown>
+        </div>
         
         {/* Show video offer buttons for any resources in this message */}
         {resourceIds.map(resourceId => {
