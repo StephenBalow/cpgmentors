@@ -9,6 +9,7 @@
 // =============================================================================
 // UPDATED: December 1, 2025 - Added Clinical Tests support for Classification step
 // UPDATED: December 2, 2025 - Fixed asterisk formatting, added proactive resource offering
+// UPDATED: December 9, 2025 - CR-001: Improved recommendation presentation (specific first, then tracking)
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -93,10 +94,29 @@ Adapt to experience level:
 - Validate or correct using stage_reasoning from the patient case
 
 ### Treatment Recommendations
-- Present evidence-graded recommendations matching their classification + stage
-- Explain the evidence grades (A = strong, B = moderate, C = weak, F = expert opinion)
-- Offer to show relevant technique videos: "Would you like to see how Ryan demonstrates this?"
-- Summarize the clinical reasoning journey they just completed
+When presenting recommendations, follow this structure:
+
+**1. LEAD with SPECIFIC Recommendations (classification + stage)**
+These are the primary interventions. Present them first with evidence grades.
+- "For acute mobility deficits, the evidence supports..." 
+- Explain WHY these fit this patient's presentation
+- Cite the evidence grade (A = strong, B = moderate, C = weak, F = expert opinion)
+
+**2. FOLLOW with Outcome Tracking (General Recommendations)**
+After discussing specific interventions, mention how to track progress:
+- Outcome Measures (Grade A): "To track progress, use validated questionnaires like the NDI"
+- Activity Limitations: Connect to the patient's functional goal ("tracking her blind spot goal")
+
+**3. DO NOT REPEAT what was covered in earlier steps:**
+- Screening (already covered in Step 1)
+- Physical Impairment Measures (already covered in Step 2)
+- Classification guidance (already covered in Step 2)
+- Only mention Imaging if the PT specifically asks
+
+**4. WRAP UP with:**
+- Offer technique videos: "Would you like to see how Ryan demonstrates this?"
+- Summarize the clinical reasoning journey
+- Celebrate their successful navigation of the pathway
 
 ## CRITICAL RULES
 
@@ -206,6 +226,11 @@ export interface Recommendation {
   stage: string;     // Acute, Subacute, Chronic, All Stages
   intervention_types: string[] | null;
   keywords: string[] | null;
+  // CR-001: New fields for recommendation scope
+  recommendation_scope?: 'universal' | 'general' | 'specific';
+  scope_domain?: string;
+  classification_id?: string;
+  stage_id?: string;
 }
 
 // NEW: Clinical Test interface for diagnostic tests that support classification
@@ -307,8 +332,8 @@ export interface SamContext {
   redFlags: RedFlag[];
   classifications: PathwayOutcome[];  // Outcomes for classification step
   stages: PathwayOutcome[];           // Outcomes for stage step
-  recommendations: Recommendation[];   // Filtered by classification + stage
-  resources: ExternalResource[];       // Recommended resources for this case
+  recommendations: Recommendation[];  // Universal + General + Specific (by classification and stage)
+  resources: ExternalResource[];      // Recommended resources for this case
   tests: ClinicalTest[];              // Clinical tests that support classification
   conversationState: ConversationState;
   userMessage: string;
@@ -328,6 +353,20 @@ export function buildSamPrompt(context: SamContext): string {
     conversationState,
     userMessage,
   } = context;
+
+  // CR-001: Build recommendation strings by scope for Step 4
+  // This avoids complex nested template literals
+  const specificRecs = recommendations
+    .filter(r => r['recommendation_scope'] === 'specific')
+    .map(r => `- [Grade ${r.evidence_grade}] ${r.recommendation_text}`)
+    .join('\n');
+  
+  const specificRecsText = specificRecs || 'No specific recommendations found for this classification + stage combination.';
+
+  // Build resources text
+  const resourcesText = resources
+    .map(r => `- ID: ${r.id} | "${r.title}" (${r.resource_type})${r.video_url ? ' [Has Video]' : ''}`)
+    .join('\n');
 
   return `
 ## CURRENT PATIENT CASE
@@ -388,11 +427,24 @@ ${stages.map(s => `- ${s.condition_type}: ${s.condition_text}`).join('\n')}
 
 ${currentStep.step_number === 4 ? `
 ### RECOMMENDATIONS FOR ${conversationState.classificationSelected || 'Selected Classification'} + ${conversationState.stageSelected || 'Selected Stage'}
-${recommendations.map(r => `- [Grade ${r.evidence_grade}] ${r.recommendation_text}`).join('\n')}
+
+**SPECIFIC RECOMMENDATIONS (Primary Focus - discuss these first):**
+These are the interventions specific to this patient's classification and stage.
+${specificRecsText}
+
+**GENERAL RECOMMENDATIONS FOR TRACKING PROGRESS (Mention after specific interventions):**
+- Outcome Measures (Grade A): Use validated self-report questionnaires (NDI, PSFS) to track progress
+- Activity Limitation Measures (Grade F): Track the patient's functional goal (${patientCase.chief_complaint})
+
+**ALREADY ADDRESSED IN EARLIER STEPS (Do not repeat):**
+- Screening recommendations (Step 1)
+- Physical Impairment Measures (Step 2)
+- Classification guidance (Step 2)
+- Imaging (only discuss if PT asks)
 
 ### AVAILABLE RESOURCES TO OFFER
 When offering a video, include the marker [RESOURCE:id] so the UI can display it.
-${resources.map(r => `- ID: ${r.id} | "${r.title}" (${r.resource_type})${r.video_url ? ' [Has Video]' : ''}`).join('\n')}
+${resourcesText}
 
 **IMPORTANT: Proactively offer these resources!** Don't wait for the PT to ask. As part of wrapping up the case, say something like:
 "Would you like to see how Ryan demonstrates [technique]? [RESOURCE:resource-id-here]"

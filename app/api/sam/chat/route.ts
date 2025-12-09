@@ -134,18 +134,85 @@ export async function POST(request: NextRequest) {
       stages = data || [];
     }
 
-    // 7. Get recommendations (filtered by classification + stage if known)
+    // 7. Get recommendations
+    // CR-001: Now includes universal + general scope (always) plus specific scope (when classification/stage known)
     let recommendations: Recommendation[] = [];
+    
+    // Step 7a: Always get universal and general recommendations (apply to all patients)
+    const { data: universalAndGeneral } = await supabase
+      .from('cpg_recommendations')
+      .select('*')
+      .eq('cpg_id', patientCase.cpg_id)
+      .in('recommendation_scope', ['universal', 'general'])
+      .order('evidence_grade', { ascending: true });
+    
+    // Step 7b: If classification + stage are known, also get specific recommendations
     if (conversationState.classificationSelected && conversationState.stageSelected) {
-      const { data } = await supabase
-        .from('cpg_recommendations')
-        .select('*')
+      // Look up the classification_id from reference table
+      const { data: classificationData, error: classError } = await supabase
+        .from('cpg_classifications')
+        .select('id')
         .eq('cpg_id', patientCase.cpg_id)
-        .ilike('category', `%${conversationState.classificationSelected}%`)
-        .ilike('stage', `%${conversationState.stageSelected}%`)
-        .order('evidence_grade', { ascending: true });
-      recommendations = data || [];
+        .eq('name', conversationState.classificationSelected)
+        .single();
+      
+      // DEBUG
+      //console.log('CR-001 Classification lookup:', {
+      //  searching: conversationState.classificationSelected,
+      //  found: classificationData?.id,
+      //  error: classError?.message
+      //});
+      
+      // Look up the stage_id from reference table
+      const { data: stageData, error: stageError } = await supabase
+        .from('cpg_stages')
+        .select('id')
+        .eq('cpg_id', patientCase.cpg_id)
+        .eq('name', conversationState.stageSelected)
+        .single();
+      
+      // DEBUG
+      console.log('CR-001 Stage lookup:', {
+        searching: conversationState.stageSelected,
+        found: stageData?.id,
+        error: stageError?.message
+      });
+      
+      // If we found both, fetch specific recommendations
+      if (classificationData && stageData) {
+        const { data: specificRecs } = await supabase
+          .from('cpg_recommendations')
+          .select('*')
+          .eq('cpg_id', patientCase.cpg_id)
+          .eq('recommendation_scope', 'specific')
+          .eq('classification_id', classificationData.id)
+          .eq('stage_id', stageData.id)
+          .order('evidence_grade', { ascending: true });
+        
+        // Combine: universal/general first, then specific
+        recommendations = [
+          ...(universalAndGeneral || []),
+          ...(specificRecs || [])
+        ];
+      } else {
+        // Fallback if lookup fails - just use universal/general
+        console.warn('CR-001: Could not find classification or stage ID, using universal/general only');
+        recommendations = universalAndGeneral || [];
+      }
+    } else {
+      // No classification/stage selected yet - just universal/general
+      recommendations = universalAndGeneral || [];
     }
+
+  // CR-001 DEBUG: Log what we're sending to Sam
+  //  console.log('CR-001 Recommendations:', {
+  //    totalCount: recommendations.length,
+  //    classificationSelected: conversationState.classificationSelected,
+  //    stageSelected: conversationState.stageSelected
+  //  });
+    
+   // CR-001 DEBUG: Show actual recommendation content being sent
+   // console.log('CR-001 Recommendation Details:', JSON.stringify(recommendations, null, 2));
 
     // 8. Get recommended resources for this case
     let resources: ExternalResource[] = [];
@@ -301,7 +368,26 @@ export async function POST(request: NextRequest) {
 
     const shouldAdvanceStep = step1to2 || step2to3 || step3to4 || step4complete || genericTransition;
 
-    // Update step tracking
+ // =============================================================================
+// CR-001 OPTION C: CAPTURE CLASSIFICATION/STAGE ON STEP TRANSITIONS
+// =============================================================================
+//
+// INSTRUCTIONS:
+// 1. Open app/api/sam/chat/route.ts
+// 2. Find the section starting with "// Update step tracking" (around line 322)
+// 3. REPLACE from "// Update step tracking" through the "const updatedState" block
+// 4. With the code below
+//
+// This captures the PT's selection when Sam confirms and advances the step.
+// =============================================================================
+
+    // -------------------------------------------------------------------------
+    // UPDATE STEP TRACKING AND CAPTURE SELECTIONS
+    // -------------------------------------------------------------------------
+    // CR-001: When Sam advances a step, we know the PT selected correctly.
+    // Capture the expected values as the "selected" values for recommendation filtering.
+    // -------------------------------------------------------------------------
+
     const newCurrentStep = shouldAdvanceStep && conversationState.currentStepNumber < pathwaySteps.length
       ? conversationState.currentStepNumber + 1
       : conversationState.currentStepNumber;
@@ -310,20 +396,39 @@ export async function POST(request: NextRequest) {
       ? [...conversationState.completedSteps, conversationState.currentStepNumber]
       : [...conversationState.completedSteps];
 
+    // CR-001: Capture classification when transitioning from Step 2 to Step 3
+    let newClassificationSelected = conversationState.classificationSelected;
+    if (step2to3 && patientCase.expected_classification) {
+      newClassificationSelected = patientCase.expected_classification;
+      console.log('CR-001: Captured classification:', newClassificationSelected);
+    }
+
+    // CR-001: Capture stage when transitioning from Step 3 to Step 4
+    let newStageSelected = conversationState.stageSelected;
+    if (step3to4 && patientCase.expected_stage) {
+      newStageSelected = patientCase.expected_stage;
+      console.log('CR-001: Captured stage:', newStageSelected);
+    }
+
     const updatedState: ConversationState = {
       ...conversationState,
       currentStepNumber: newCurrentStep,
       completedSteps: newCompletedSteps,
       totalSteps: pathwaySteps.length,
       messages: updatedMessages,
+      // CR-001: Include captured selections
+      classificationSelected: newClassificationSelected,
+      stageSelected: newStageSelected,
     };
 
-    // Log for debugging - now includes which trigger fired
+    // Log for debugging - now includes captured selections
     console.log('Sam Response:', {
       step: currentStep.pathway_name,
       messageLength: samResponse.length,
       shouldAdvanceStep,
       newCurrentStep,
+      classificationSelected: newClassificationSelected,
+      stageSelected: newStageSelected,
       triggers: { step1to2, step2to3, step3to4, step4complete, genericTransition },
     });
 
