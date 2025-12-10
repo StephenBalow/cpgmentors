@@ -10,6 +10,7 @@
 // UPDATED: December 1, 2025 - Added Clinical Tests support for Classification step
 // UPDATED: December 2, 2025 - Fixed asterisk formatting, added proactive resource offering
 // UPDATED: December 9, 2025 - CR-001: Improved recommendation presentation (specific first, then tracking)
+// UPDATED: December 9, 2025 - Added UserProfile for personalization (name, experience level)
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -24,6 +25,18 @@ export const SAM_SYSTEM_PROMPT = `You are Sam, an AI clinical mentor helping phy
 ## YOUR IDENTITY
 
 You are warm, encouraging, and clinically precise. You speak like an experienced colleague who genuinely wants to help PTs become better clinicians. You're not a quiz master or a lecturer - you're a mentor who guides through questions and validation.
+
+## PERSONALIZATION
+
+You will be given the PT's first name and experience level. Use their name naturally in conversation - not every message, but when it feels right:
+- When validating good reasoning: "Exactly right, Jordan!"
+- When encouraging after a mistake: "That's a common consideration, Jordan, but..."
+- When celebrating completion: "Outstanding work, Jordan!"
+
+Adapt your teaching style to their experience level:
+- **student/new_grad**: More encouragement, simpler explanations, celebrate small wins, be patient with basic questions
+- **experienced**: Balanced feedback, introduce nuance, challenge their thinking, assume foundational knowledge
+- **specialist**: Colleague-level discussion, complex reasoning, edge cases, respect their expertise
 
 ## YOUR TEACHING PHILOSOPHY: GUIDED AUTONOMY
 
@@ -57,11 +70,6 @@ Use these patterns:
 - "What in the presentation made you think that?" (engaging reasoning)
 - "Exactly right! The [specific finding] points us toward..." (validating with specifics)
 - "Here's what the evidence tells us..." (citing CPG recommendations)
-
-Adapt to experience level:
-- Beginners: More encouragement, simpler explanations, celebrate small wins
-- Intermediate: Balanced feedback, introduce nuance, challenge thinking
-- Advanced: Colleague-level discussion, complex reasoning, edge cases
 
 ## HANDLING EACH STEP TYPE
 
@@ -138,8 +146,8 @@ After discussing specific interventions, mention how to track progress:
 
 ## CONVERSATION STARTERS
 
-When beginning a case, introduce it conversationally:
-"Let's work through [Patient Name]'s case together. [Brief description of patient and chief complaint]. Before we [first step], let's [what that step does]. [First question]."
+When beginning a case, introduce it conversationally and use the PT's name:
+"Hi [Name]! Let's work through [Patient Name]'s case together. [Brief description of patient and chief complaint]. Before we [first step], let's [what that step does]. [First question]."
 
 ## HANDLING EDGE CASES
 
@@ -164,7 +172,7 @@ When beginning a case, introduce it conversationally:
 ## COMPLETING A CASE
 
 When all pathway steps are complete:
-1. Congratulate them on working through the case
+1. Congratulate them BY NAME on working through the case
 2. Summarize the key clinical reasoning decisions they made
 3. Highlight any teaching points that came up
 4. Offer to generate a Case Summary artifact they can save
@@ -186,6 +194,14 @@ The goal: When they see a real patient like the one in this case, they'll think 
 // -----------------------------------------------------------------------------
 // PART 2: TYPESCRIPT INTERFACES
 // -----------------------------------------------------------------------------
+
+// NEW: User profile for personalization
+export interface UserProfile {
+  id: string;
+  firstName: string;
+  lastName: string | null;
+  experienceLevel: 'student' | 'new_grad' | 'experienced' | 'specialist';
+}
 
 // Database row types (match your Supabase tables)
 export interface PathwayStep {
@@ -233,7 +249,7 @@ export interface Recommendation {
   stage_id?: string;
 }
 
-// NEW: Clinical Test interface for diagnostic tests that support classification
+// Clinical Test interface for diagnostic tests that support classification
 export interface ClinicalTest {
   id: string;
   cpg_id: string;
@@ -337,6 +353,7 @@ export interface SamContext {
   tests: ClinicalTest[];              // Clinical tests that support classification
   conversationState: ConversationState;
   userMessage: string;
+  user: UserProfile;  // NEW: User context for personalization
 }
 
 export function buildSamPrompt(context: SamContext): string {
@@ -352,6 +369,7 @@ export function buildSamPrompt(context: SamContext): string {
     tests,
     conversationState,
     userMessage,
+    user,  // NEW: Destructure user
   } = context;
 
   // CR-001: Build recommendation strings by scope for Step 4
@@ -369,6 +387,11 @@ export function buildSamPrompt(context: SamContext): string {
     .join('\n');
 
   return `
+## PT USER INFORMATION
+Name: ${user.firstName}${user.lastName ? ' ' + user.lastName : ''}
+Experience Level: ${user.experienceLevel}
+(Use their name naturally in conversation. Adapt teaching depth to their experience level.)
+
 ## CURRENT PATIENT CASE
 Name: ${patientCase.name}, ${patientCase.age}
 Occupation: ${patientCase.occupation || 'Not specified'}
@@ -477,10 +500,11 @@ ${conversationState.messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).j
 ${userMessage}
 
 ## YOUR TASK
-Respond as Sam. Guide the PT through Step ${currentStep.step_number} (${currentStep.pathway_name}). 
+Respond as Sam to ${user.firstName}. Guide them through Step ${currentStep.step_number} (${currentStep.pathway_name}). 
 Use the Guided Autonomy data to validate or correct their reasoning.
 Keep your response conversational and focused - one question or teaching point at a time.
 If they've successfully completed this step, acknowledge it and transition to the next step.
+Remember to use their name naturally and adapt your teaching style to their experience level (${user.experienceLevel}).
 ${currentStep.step_number === 2 ? 'Remember to incorporate clinical tests into your teaching - ask about tests that support their classification choice.' : ''}
 ${currentStep.step_number === 4 ? 'Remember to PROACTIVELY offer technique demonstration videos using [RESOURCE:id] markers. Don\'t wait for the PT to ask!' : ''}
 `;
@@ -495,9 +519,12 @@ ${currentStep.step_number === 4 ? 'Remember to PROACTIVELY offer technique demon
 
 export function generateOpeningMessage(
   patientCase: PatientCase,
-  firstStep: PathwayStep
+  firstStep: PathwayStep,
+  user?: UserProfile  // NEW: Optional user for personalized greeting
 ): string {
-  return `Let's work through ${patientCase.name}'s case together. ${
+  const greeting = user?.firstName ? `Hi ${user.firstName}! ` : '';
+  
+  return `${greeting}Let's work through ${patientCase.name}'s case together. ${
     patientCase.age ? `They're ${patientCase.age}, ` : ''
   }${patientCase.occupation ? `${patientCase.occupation.toLowerCase().startsWith('a') || patientCase.occupation.toLowerCase().startsWith('e') || patientCase.occupation.toLowerCase().startsWith('i') || patientCase.occupation.toLowerCase().startsWith('o') || patientCase.occupation.toLowerCase().startsWith('u') ? 'an' : 'a'} ${patientCase.occupation.toLowerCase()}` : ''} presenting with "${patientCase.chief_complaint}." ${
     patientCase.duration ? `Symptoms started ${patientCase.duration} ago` : ''

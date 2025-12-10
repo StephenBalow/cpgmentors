@@ -4,13 +4,17 @@
 // A React hook that manages the conversation with Sam.
 // Handles state, API calls, and message history.
 // =============================================================================
+// UPDATED: December 9, 2025 - Added conversation saving (conversationId tracking)
+// =============================================================================
 
 import { useState, useCallback } from 'react';
 import type { ConversationState, Message, ExternalResource } from '@/lib/sam/system-prompt';
+import { DEMO_USER_ID } from '../constants/user';
 
 interface UseSamOptions {
   caseId: string;
   onError?: (error: string) => void;
+  onResume?: () => void;  // NEW: Callback when resuming an existing conversation
 }
 
 interface UseSamReturn {
@@ -21,6 +25,8 @@ interface UseSamReturn {
   totalSteps: number;
   completedSteps: number[];
   resources: ExternalResource[];
+  conversationId: string | null;  // NEW: Expose conversationId
+  isResumed: boolean;             // NEW: Whether we resumed an existing conversation
   
   // Actions
   startConversation: () => Promise<void>;
@@ -44,16 +50,22 @@ const initialState: ConversationState = {
   messages: [],
 };
 
-export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
+export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamReturn {
   const [conversationState, setConversationState] = useState<ConversationState>(initialState);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resources, setResources] = useState<ExternalResource[]>([]);
+  
+  // NEW: Track conversation ID for persistence
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [isResumed, setIsResumed] = useState(false);
 
   // Start a new conversation (gets Sam's opening message)
+  // Or resume an existing in-progress conversation
   const startConversation = useCallback(async () => {
     setIsLoading(true);
     setError(null);
+    setIsResumed(false);  // Reset resume flag
 
     try {
       const response = await fetch('/api/sam/chat', {
@@ -61,8 +73,10 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseId,
+          userId: DEMO_USER_ID,
           message: '',
           conversationState: initialState,
+          conversationId: null,  // NEW: null on start - API will check for existing
           isFirstMessage: true,
         }),
       });
@@ -72,6 +86,18 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
       }
 
       const data = await response.json();
+      
+      // NEW: Store the conversation ID for future requests
+      if (data.conversationId) {
+        setConversationId(data.conversationId);
+      }
+      
+      // NEW: Handle resumed conversations
+      if (data.isResumed) {
+        setIsResumed(true);
+        onResume?.();  // Notify parent component if needed
+      }
+      
       setConversationState(data.updatedState);
       
     } catch (err) {
@@ -81,7 +107,7 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [caseId, onError]);
+  }, [caseId, onError, onResume]);
 
   // Send a message to Sam
   const sendMessage = useCallback(async (message: string) => {
@@ -114,8 +140,10 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseId,
+          userId: DEMO_USER_ID,  // NEW: Include userId
           message,
           conversationState: stateWithUserMessage,
+          conversationId,  // NEW: Include conversationId for persistence
           isFirstMessage: false,
         }),
       });
@@ -125,6 +153,12 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
       }
 
       const data = await response.json();
+      
+      // NEW: Update conversationId if returned (shouldn't change, but be safe)
+      if (data.conversationId) {
+        setConversationId(data.conversationId);
+      }
+      
       // API returns state with Sam's response added
       setConversationState(data.updatedState);
       
@@ -142,11 +176,14 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
     } finally {
       setIsLoading(false);
     }
-  }, [caseId, conversationState, onError]);
+  }, [caseId, conversationState, conversationId, onError]);
 
   // Reset the conversation
+  // NEW: Also resets conversationId so next start creates fresh conversation
   const reset = useCallback(() => {
     setConversationState(initialState);
+    setConversationId(null);  // NEW: Clear conversation ID
+    setIsResumed(false);      // NEW: Clear resumed flag
     setError(null);
     setResources([]);
   }, []);
@@ -169,6 +206,8 @@ export function useSam({ caseId, onError }: UseSamOptions): UseSamReturn {
     totalSteps: conversationState.totalSteps,
     completedSteps: conversationState.completedSteps,
     resources,
+    conversationId,  // NEW: Expose for debugging/display if needed
+    isResumed,       // NEW: Expose so UI can show "Resuming..." message
     
     startConversation,
     sendMessage,

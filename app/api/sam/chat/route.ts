@@ -9,6 +9,9 @@
 // =============================================================================
 // UPDATED: December 1, 2025 - Added Clinical Tests support for Classification step
 // UPDATED: December 1, 2025 - Fixed step transition detection for all 4 steps
+// UPDATED: December 9, 2025 - CR-001: Classification/stage reference tables
+// UPDATED: December 9, 2025 - Added profiles integration (userId, userName, experienceLevel)
+// UPDATED: December 9, 2025 - Added conversation saving to user_conversations
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -28,6 +31,7 @@ import {
   type ConversationState,
   type SamContext,
   type Message,
+  type UserProfile,
 } from '@/lib/sam/system-prompt';
 
 // Initialize Anthropic client
@@ -38,8 +42,10 @@ const anthropic = new Anthropic({
 // Request body type
 interface ChatRequest {
   caseId: string;
+  userId: string;
   message: string;
   conversationState: ConversationState;
+  conversationId?: string;  // NEW: Track conversation across requests
   isFirstMessage?: boolean;
 }
 
@@ -48,13 +54,15 @@ interface ChatResponse {
   response: string;
   updatedState: ConversationState;
   shouldAdvanceStep: boolean;
+  conversationId: string;  // NEW: Return conversation ID to frontend
+  isResumed?: boolean;     // NEW: Tell frontend if we resumed an existing conversation
   resources?: ExternalResource[];
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body: ChatRequest = await request.json();
-    const { caseId, message, conversationState, isFirstMessage } = body;
+    const { caseId, userId, message, conversationState, conversationId, isFirstMessage } = body;
 
     // Create Supabase client
     const supabase = await createClient();
@@ -62,6 +70,24 @@ export async function POST(request: NextRequest) {
     // ---------------------------------------------------------------------
     // FETCH ALL THE DATA SAM NEEDS
     // ---------------------------------------------------------------------
+
+    // 0. Get the user profile for personalization
+    const { data: userProfile, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, first_name, last_name, experience_level')
+      .eq('id', userId)
+      .single();
+
+    if (profileError || !userProfile) {
+      console.error('Error fetching user profile:', profileError);
+    }
+
+    const user: UserProfile = {
+      id: userId,
+      firstName: userProfile?.first_name || 'there',
+      lastName: userProfile?.last_name || null,
+      experienceLevel: userProfile?.experience_level || 'experienced',
+    };
 
     // 1. Get the patient case with all Guided Autonomy fields
     const { data: patientCase, error: caseError } = await supabase
@@ -91,6 +117,123 @@ export async function POST(request: NextRequest) {
         { error: 'Pathway steps not found' },
         { status: 404 }
       );
+    }
+
+    // =====================================================================
+    // CONVERSATION MANAGEMENT (NEW)
+    // =====================================================================
+    
+    let activeConversationId = conversationId;
+    let isResumed = false;
+
+    if (isFirstMessage) {
+      // Check for existing in_progress or abandoned conversation
+      const { data: existingConversation } = await supabase
+        .from('user_conversations')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('patient_case_id', caseId)
+        .in('status', ['in_progress', 'abandoned'])
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (existingConversation) {
+        // RESUME existing conversation
+        activeConversationId = existingConversation.id;
+        isResumed = true;
+
+        // Parse the stored messages
+        const storedMessages = existingConversation.messages as Message[];
+        
+        // Build the resumed state
+        const resumedState: ConversationState = {
+          currentStepNumber: existingConversation.current_pathway_step || 1,
+          totalSteps: pathwaySteps.length,
+          completedSteps: Array.from({ length: (existingConversation.current_pathway_step || 1) - 1 }, (_, i) => i + 1),
+          redFlagsCleared: (existingConversation.current_pathway_step || 1) > 1,
+          classificationSelected: null,  // Will be repopulated if they were past step 2
+          classificationCorrect: null,
+          stageSelected: null,
+          stageCorrect: null,
+          messages: storedMessages,
+        };
+
+        // Update the conversation to mark it as resumed (updates timestamp)
+        await supabase
+          .from('user_conversations')
+          .update({ 
+            status: 'in_progress',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', activeConversationId);
+
+        // Generate a welcome back message
+        const welcomeBackMessage = `Welcome back, ${user.firstName}! We were working on ${patientCase.name}'s case. ${
+          existingConversation.current_pathway_step === 1 
+            ? "Let's continue with the medical screening." 
+            : existingConversation.current_pathway_step === 2
+            ? "You had completed the red flag screening. Let's continue with classification."
+            : existingConversation.current_pathway_step === 3
+            ? "You had classified the condition. Let's determine the stage."
+            : "You were almost done! Let's finish with treatment recommendations."
+        }`;
+
+        // Add welcome back message to the conversation
+        const welcomeMessage: Message = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: welcomeBackMessage,
+          timestamp: new Date(),
+        };
+
+        const updatedMessages = [...storedMessages, welcomeMessage];
+
+        // Save the welcome back message
+        await supabase
+          .from('user_conversations')
+          .update({ 
+            messages: updatedMessages,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', activeConversationId);
+
+        return NextResponse.json({
+          response: welcomeBackMessage,
+          updatedState: {
+            ...resumedState,
+            messages: updatedMessages,
+          },
+          shouldAdvanceStep: false,
+          conversationId: activeConversationId,
+          isResumed: true,
+        });
+      } else {
+        // CREATE new conversation
+        const { data: newConversation, error: createError } = await supabase
+          .from('user_conversations')
+          .insert({
+            user_id: userId,
+            cpg_id: patientCase.cpg_id,
+            conversation_type: 'practice',
+            patient_case_id: caseId,
+            messages: [],
+            status: 'in_progress',
+            current_pathway_step: 1,
+          })
+          .select()
+          .single();
+
+        if (createError || !newConversation) {
+          console.error('Error creating conversation:', createError);
+          return NextResponse.json(
+            { error: 'Failed to create conversation' },
+            { status: 500 }
+          );
+        }
+
+        activeConversationId = newConversation.id;
+      }
     }
 
     // 3. Get the current step
@@ -134,11 +277,9 @@ export async function POST(request: NextRequest) {
       stages = data || [];
     }
 
-    // 7. Get recommendations
-    // CR-001: Now includes universal + general scope (always) plus specific scope (when classification/stage known)
+    // 7. Get recommendations (CR-001 logic)
     let recommendations: Recommendation[] = [];
     
-    // Step 7a: Always get universal and general recommendations (apply to all patients)
     const { data: universalAndGeneral } = await supabase
       .from('cpg_recommendations')
       .select('*')
@@ -146,39 +287,21 @@ export async function POST(request: NextRequest) {
       .in('recommendation_scope', ['universal', 'general'])
       .order('evidence_grade', { ascending: true });
     
-    // Step 7b: If classification + stage are known, also get specific recommendations
     if (conversationState.classificationSelected && conversationState.stageSelected) {
-      // Look up the classification_id from reference table
-      const { data: classificationData, error: classError } = await supabase
+      const { data: classificationData } = await supabase
         .from('cpg_classifications')
         .select('id')
         .eq('cpg_id', patientCase.cpg_id)
         .eq('name', conversationState.classificationSelected)
         .single();
       
-      // DEBUG
-      //console.log('CR-001 Classification lookup:', {
-      //  searching: conversationState.classificationSelected,
-      //  found: classificationData?.id,
-      //  error: classError?.message
-      //});
-      
-      // Look up the stage_id from reference table
-      const { data: stageData, error: stageError } = await supabase
+      const { data: stageData } = await supabase
         .from('cpg_stages')
         .select('id')
         .eq('cpg_id', patientCase.cpg_id)
         .eq('name', conversationState.stageSelected)
         .single();
       
-      // DEBUG
-      console.log('CR-001 Stage lookup:', {
-        searching: conversationState.stageSelected,
-        found: stageData?.id,
-        error: stageError?.message
-      });
-      
-      // If we found both, fetch specific recommendations
       if (classificationData && stageData) {
         const { data: specificRecs } = await supabase
           .from('cpg_recommendations')
@@ -189,30 +312,16 @@ export async function POST(request: NextRequest) {
           .eq('stage_id', stageData.id)
           .order('evidence_grade', { ascending: true });
         
-        // Combine: universal/general first, then specific
         recommendations = [
           ...(universalAndGeneral || []),
           ...(specificRecs || [])
         ];
       } else {
-        // Fallback if lookup fails - just use universal/general
-        console.warn('CR-001: Could not find classification or stage ID, using universal/general only');
         recommendations = universalAndGeneral || [];
       }
     } else {
-      // No classification/stage selected yet - just universal/general
       recommendations = universalAndGeneral || [];
     }
-
-  // CR-001 DEBUG: Log what we're sending to Sam
-  //  console.log('CR-001 Recommendations:', {
-  //    totalCount: recommendations.length,
-  //    classificationSelected: conversationState.classificationSelected,
-  //    stageSelected: conversationState.stageSelected
-  //  });
-    
-   // CR-001 DEBUG: Show actual recommendation content being sent
-   // console.log('CR-001 Recommendation Details:', JSON.stringify(recommendations, null, 2));
 
     // 8. Get recommended resources for this case
     let resources: ExternalResource[] = [];
@@ -225,33 +334,47 @@ export async function POST(request: NextRequest) {
     }
 
     // ---------------------------------------------------------------------
-    // HANDLE FIRST MESSAGE (Opening)
+    // HANDLE FIRST MESSAGE (Opening) - New conversation only
     // ---------------------------------------------------------------------
     
-    if (isFirstMessage) {
+    if (isFirstMessage && !isResumed) {
       const openingMessage = generateOpeningMessage(
         patientCase as PatientCase,
-        pathwaySteps[0]
+        pathwaySteps[0],
+        user
       );
+
+      const initialMessages: Message[] = [
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: openingMessage,
+          timestamp: new Date(),
+        },
+      ];
+
+      // Save the opening message to the conversation
+      await supabase
+        .from('user_conversations')
+        .update({ 
+          messages: initialMessages,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', activeConversationId);
 
       const updatedState: ConversationState = {
         ...conversationState,
         currentStepNumber: 1,
         totalSteps: pathwaySteps.length,
-        messages: [
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: openingMessage,
-            timestamp: new Date(),
-          },
-        ],
+        messages: initialMessages,
       };
 
       return NextResponse.json({
         response: openingMessage,
         updatedState,
         shouldAdvanceStep: false,
+        conversationId: activeConversationId,
+        isResumed: false,
       });
     }
 
@@ -271,13 +394,10 @@ export async function POST(request: NextRequest) {
       tests: (tests || []) as ClinicalTest[],
       conversationState,
       userMessage: message,
+      user,
     };
 
     const userPrompt = buildSamPrompt(context);
-
-    // The conversationState.messages already includes the user's message
-    // (added by use-sam.ts before calling this API)
-    // So we use it directly without adding again
 
     // Call Claude API
     const response = await anthropic.messages.create({
@@ -301,7 +421,6 @@ export async function POST(request: NextRequest) {
     // UPDATE CONVERSATION STATE
     // ---------------------------------------------------------------------
 
-    // Add ONLY Sam's response to history (user message is already there from use-sam.ts)
     const updatedMessages: Message[] = [
       ...conversationState.messages,
       {
@@ -315,12 +434,9 @@ export async function POST(request: NextRequest) {
     // -------------------------------------------------------------------------
     // DETERMINE IF WE SHOULD ADVANCE TO NEXT STEP
     // -------------------------------------------------------------------------
-    // Each transition has specific trigger phrases based on how Sam actually talks
-    // -------------------------------------------------------------------------
     
     const lowerResponse = samResponse.toLowerCase();
 
-    // Step 1 → 2: Red Flags complete, moving to Classification
     const step1to2 = 
       lowerResponse.includes("move to classification") ||
       lowerResponse.includes("proceed to classification") ||
@@ -329,7 +445,6 @@ export async function POST(request: NextRequest) {
       (lowerResponse.includes("no red flags") && lowerResponse.includes("which category")) ||
       (lowerResponse.includes("appropriate for pt") && lowerResponse.includes("classif"));
 
-    // Step 2 → 3: Classification complete, moving to Stage
     const step2to3 = 
       lowerResponse.includes("move to stage") ||
       lowerResponse.includes("determine the stage") ||
@@ -341,7 +456,6 @@ export async function POST(request: NextRequest) {
       lowerResponse.includes("classify his condition as") ||
       (lowerResponse.includes("how long has") && lowerResponse.includes("symptom"));
 
-    // Step 3 → 4: Stage complete, moving to Recommendations
     const step3to4 = 
       lowerResponse.includes("move to treatment") ||
       lowerResponse.includes("move to recommendation") ||
@@ -352,7 +466,6 @@ export async function POST(request: NextRequest) {
       lowerResponse.includes("final step in our clinical pathway") ||
       (lowerResponse.includes("acute stage") && lowerResponse.includes("intervention"));
 
-    // Step 4 → Complete: Case finished
     const step4complete = 
       lowerResponse.includes("successfully navigated") ||
       lowerResponse.includes("case summary") ||
@@ -360,7 +473,6 @@ export async function POST(request: NextRequest) {
       lowerResponse.includes("outstanding work! you've") ||
       lowerResponse.includes("excellent clinical reasoning throughout");
 
-    // Generic transition phrases that work for any step
     const genericTransition = 
       lowerResponse.includes("move on to the next clinical decision") ||
       lowerResponse.includes("ready to move on") ||
@@ -368,24 +480,8 @@ export async function POST(request: NextRequest) {
 
     const shouldAdvanceStep = step1to2 || step2to3 || step3to4 || step4complete || genericTransition;
 
- // =============================================================================
-// CR-001 OPTION C: CAPTURE CLASSIFICATION/STAGE ON STEP TRANSITIONS
-// =============================================================================
-//
-// INSTRUCTIONS:
-// 1. Open app/api/sam/chat/route.ts
-// 2. Find the section starting with "// Update step tracking" (around line 322)
-// 3. REPLACE from "// Update step tracking" through the "const updatedState" block
-// 4. With the code below
-//
-// This captures the PT's selection when Sam confirms and advances the step.
-// =============================================================================
-
     // -------------------------------------------------------------------------
     // UPDATE STEP TRACKING AND CAPTURE SELECTIONS
-    // -------------------------------------------------------------------------
-    // CR-001: When Sam advances a step, we know the PT selected correctly.
-    // Capture the expected values as the "selected" values for recommendation filtering.
     // -------------------------------------------------------------------------
 
     const newCurrentStep = shouldAdvanceStep && conversationState.currentStepNumber < pathwaySteps.length
@@ -396,19 +492,19 @@ export async function POST(request: NextRequest) {
       ? [...conversationState.completedSteps, conversationState.currentStepNumber]
       : [...conversationState.completedSteps];
 
-    // CR-001: Capture classification when transitioning from Step 2 to Step 3
     let newClassificationSelected = conversationState.classificationSelected;
     if (step2to3 && patientCase.expected_classification) {
       newClassificationSelected = patientCase.expected_classification;
-      console.log('CR-001: Captured classification:', newClassificationSelected);
     }
 
-    // CR-001: Capture stage when transitioning from Step 3 to Step 4
     let newStageSelected = conversationState.stageSelected;
     if (step3to4 && patientCase.expected_stage) {
       newStageSelected = patientCase.expected_stage;
-      console.log('CR-001: Captured stage:', newStageSelected);
     }
+
+    // Determine if case is complete
+    const caseComplete = step4complete;
+    const newStatus = caseComplete ? 'completed' : 'in_progress';
 
     const updatedState: ConversationState = {
       ...conversationState,
@@ -416,26 +512,32 @@ export async function POST(request: NextRequest) {
       completedSteps: newCompletedSteps,
       totalSteps: pathwaySteps.length,
       messages: updatedMessages,
-      // CR-001: Include captured selections
       classificationSelected: newClassificationSelected,
       stageSelected: newStageSelected,
     };
 
-    // Log for debugging - now includes captured selections
-    console.log('Sam Response:', {
-      step: currentStep.pathway_name,
-      messageLength: samResponse.length,
-      shouldAdvanceStep,
-      newCurrentStep,
-      classificationSelected: newClassificationSelected,
-      stageSelected: newStageSelected,
-      triggers: { step1to2, step2to3, step3to4, step4complete, genericTransition },
-    });
+    // =====================================================================
+    // SAVE CONVERSATION TO DATABASE
+    // =====================================================================
+    
+    if (activeConversationId) {
+      await supabase
+        .from('user_conversations')
+        .update({
+          messages: updatedMessages,
+          current_pathway_step: newCurrentStep,
+          status: newStatus,
+          completed_at: caseComplete ? new Date().toISOString() : null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', activeConversationId);
+    }
 
     return NextResponse.json({
       response: samResponse,
       updatedState,
       shouldAdvanceStep,
+      conversationId: activeConversationId,
       resources: currentStep.step_number === 4 ? resources : undefined,
     });
 
