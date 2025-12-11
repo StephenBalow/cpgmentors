@@ -7,14 +7,11 @@
 // It fetches all necessary context from Supabase, builds the prompt,
 // and calls the Anthropic API.
 // =============================================================================
-// VERSION HISTORY:
-// - December 1, 2025: Added Clinical Tests support for Classification step
-// - December 1, 2025: Fixed step transition detection for all 4 steps
-// - December 9, 2025: CR-001: Classification/stage reference tables
-// - December 9, 2025: Added profiles integration (userId, userName, experienceLevel)
-// - December 9, 2025: Added conversation saving to user_conversations
-// - December 10, 2025: V2 - Updated step detection for V2 system prompt language
-// - December 10, 2025: V2 - Fixed resume logic to prevent double messages
+// UPDATED: December 1, 2025 - Added Clinical Tests support for Classification step
+// UPDATED: December 1, 2025 - Fixed step transition detection for all 4 steps
+// UPDATED: December 9, 2025 - CR-001: Classification/stage reference tables
+// UPDATED: December 9, 2025 - Added profiles integration (userId, userName, experienceLevel)
+// UPDATED: December 9, 2025 - Added conversation saving to user_conversations
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -48,7 +45,7 @@ interface ChatRequest {
   userId: string;
   message: string;
   conversationState: ConversationState;
-  conversationId?: string;
+  conversationId?: string;  // NEW: Track conversation across requests
   isFirstMessage?: boolean;
 }
 
@@ -57,9 +54,8 @@ interface ChatResponse {
   response: string;
   updatedState: ConversationState;
   shouldAdvanceStep: boolean;
-  conversationId: string;
-  isResumed?: boolean;
-  resumedFromStep?: number;  // NEW: Tell frontend which step we resumed from
+  conversationId: string;  // NEW: Return conversation ID to frontend
+  isResumed?: boolean;     // NEW: Tell frontend if we resumed an existing conversation
   resources?: ExternalResource[];
 }
 
@@ -124,12 +120,11 @@ export async function POST(request: NextRequest) {
     }
 
     // =====================================================================
-    // CONVERSATION MANAGEMENT
+    // CONVERSATION MANAGEMENT (NEW)
     // =====================================================================
     
     let activeConversationId = conversationId;
     let isResumed = false;
-    let resumedFromStep = 0;
 
     if (isFirstMessage) {
       // Check for existing in_progress or abandoned conversation
@@ -138,39 +133,33 @@ export async function POST(request: NextRequest) {
         .select('*')
         .eq('user_id', userId)
         .eq('patient_case_id', caseId)
-        .eq('status', 'in_progress')
+        .in('status', ['in_progress', 'abandoned'])
         .order('updated_at', { ascending: false })
         .limit(1)
         .single();
 
       if (existingConversation) {
-        // ===============================================================
-        // RESUME EXISTING CONVERSATION (Fixed - no double messages)
-        // ===============================================================
+        // RESUME existing conversation
         activeConversationId = existingConversation.id;
         isResumed = true;
-        resumedFromStep = existingConversation.current_pathway_step || 1;
 
         // Parse the stored messages
         const storedMessages = existingConversation.messages as Message[];
         
-        // Build the resumed state from the stored conversation
+        // Build the resumed state
         const resumedState: ConversationState = {
           currentStepNumber: existingConversation.current_pathway_step || 1,
           totalSteps: pathwaySteps.length,
-          completedSteps: Array.from(
-            { length: (existingConversation.current_pathway_step || 1) - 1 }, 
-            (_, i) => i + 1
-          ),
+          completedSteps: Array.from({ length: (existingConversation.current_pathway_step || 1) - 1 }, (_, i) => i + 1),
           redFlagsCleared: (existingConversation.current_pathway_step || 1) > 1,
-          classificationSelected: null,  // Could be enhanced to store this
+          classificationSelected: null,  // Will be repopulated if they were past step 2
           classificationCorrect: null,
           stageSelected: null,
           stageCorrect: null,
-          messages: storedMessages,  // Return stored messages AS-IS
+          messages: storedMessages,
         };
 
-        // Update the conversation status (mark as active again if abandoned)
+        // Update the conversation to mark it as resumed (updates timestamp)
         await supabase
           .from('user_conversations')
           .update({ 
@@ -179,25 +168,48 @@ export async function POST(request: NextRequest) {
           })
           .eq('id', activeConversationId);
 
-        // ===============================================================
-        // FIX: Don't add a "Welcome back" message - just return existing
-        // The frontend will show the stored messages, and the user can
-        // continue where they left off by sending their next message.
-        // ===============================================================
-        
+        // Generate a welcome back message
+        const welcomeBackMessage = `Welcome back, ${user.firstName}! We were working on ${patientCase.name}'s case. ${
+          existingConversation.current_pathway_step === 1 
+            ? "Let's continue with the medical screening." 
+            : existingConversation.current_pathway_step === 2
+            ? "You had completed the red flag screening. Let's continue with classification."
+            : existingConversation.current_pathway_step === 3
+            ? "You had classified the condition. Let's determine the stage."
+            : "You were almost done! Let's finish with treatment recommendations."
+        }`;
+
+        // Add welcome back message to the conversation
+        const welcomeMessage: Message = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: welcomeBackMessage,
+          timestamp: new Date(),
+        };
+
+        const updatedMessages = [...storedMessages, welcomeMessage];
+
+        // Save the welcome back message
+        await supabase
+          .from('user_conversations')
+          .update({ 
+            messages: updatedMessages,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', activeConversationId);
+
         return NextResponse.json({
-          response: '',  // No new message - frontend shows existing
-          updatedState: resumedState,
+          response: welcomeBackMessage,
+          updatedState: {
+            ...resumedState,
+            messages: updatedMessages,
+          },
           shouldAdvanceStep: false,
           conversationId: activeConversationId,
           isResumed: true,
-          resumedFromStep: resumedFromStep,
         });
-
       } else {
-        // ===============================================================
-        // CREATE NEW CONVERSATION
-        // ===============================================================
+        // CREATE new conversation
         const { data: newConversation, error: createError } = await supabase
           .from('user_conversations')
           .insert({
@@ -419,38 +431,21 @@ export async function POST(request: NextRequest) {
       },
     ];
 
-    // =========================================================================
-    // STEP TRANSITION DETECTION (V2 - Updated for new system prompt language)
-    // =========================================================================
+    // -------------------------------------------------------------------------
+    // DETERMINE IF WE SHOULD ADVANCE TO NEXT STEP
+    // -------------------------------------------------------------------------
     
     const lowerResponse = samResponse.toLowerCase();
 
-    // -------------------------------------------------------------------------
-    // Step 1 → Step 2: Medical Screening → Classification
-    // -------------------------------------------------------------------------
     const step1to2 = 
-      // Original phrases
       lowerResponse.includes("move to classification") ||
       lowerResponse.includes("proceed to classification") ||
       lowerResponse.includes("now let's classify") ||
       lowerResponse.includes("let's classify") ||
       (lowerResponse.includes("no red flags") && lowerResponse.includes("which category")) ||
-      (lowerResponse.includes("appropriate for pt") && lowerResponse.includes("classif")) ||
-      // V2 phrases
-      lowerResponse.includes("move to step 2") ||
-      lowerResponse.includes("let's move to step 2") ||
-      lowerResponse.includes("figuring out what we're actually dealing with") ||
-      lowerResponse.includes("what we're actually dealing with") ||
-      lowerResponse.includes("safe to treat, let's") ||
-      lowerResponse.includes("established this is safe to treat") ||
-      lowerResponse.includes("clear green light for pt") ||
-      (lowerResponse.includes("safe to treat") && lowerResponse.includes("classification"));
+      (lowerResponse.includes("appropriate for pt") && lowerResponse.includes("classif"));
 
-    // -------------------------------------------------------------------------
-    // Step 2 → Step 3: Classification → Stage Determination
-    // -------------------------------------------------------------------------
     const step2to3 = 
-      // Original phrases
       lowerResponse.includes("move to stage") ||
       lowerResponse.includes("determine the stage") ||
       lowerResponse.includes("acute, subacute, or chronic") ||
@@ -459,20 +454,9 @@ export async function POST(request: NextRequest) {
       lowerResponse.includes("classify this as - acute") ||
       lowerResponse.includes("classify her condition as") ||
       lowerResponse.includes("classify his condition as") ||
-      (lowerResponse.includes("how long has") && lowerResponse.includes("symptom")) ||
-      // V2 phrases
-      lowerResponse.includes("now let's determine the stage") ||
-      lowerResponse.includes("let's determine the stage") ||
-      lowerResponse.includes("where are we in the healing timeline") ||
-      lowerResponse.includes("based on the cpg staging criteria") ||
-      lowerResponse.includes("would you classify this as acute") ||
-      (lowerResponse.includes("staging criteria") && lowerResponse.includes("acute"));
+      (lowerResponse.includes("how long has") && lowerResponse.includes("symptom"));
 
-    // -------------------------------------------------------------------------
-    // Step 3 → Step 4: Stage Determination → Treatment Recommendations
-    // -------------------------------------------------------------------------
     const step3to4 = 
-      // Original phrases
       lowerResponse.includes("move to treatment") ||
       lowerResponse.includes("move to recommendation") ||
       lowerResponse.includes("evidence-based interventions") ||
@@ -480,61 +464,25 @@ export async function POST(request: NextRequest) {
       lowerResponse.includes("treatment priorities") ||
       lowerResponse.includes("what would you recommend") ||
       lowerResponse.includes("final step in our clinical pathway") ||
-      (lowerResponse.includes("acute stage") && lowerResponse.includes("intervention")) ||
-      // V2 phrases
-      lowerResponse.includes("let's get to the good stuff") ||
-      lowerResponse.includes("get to the good stuff") ||
-      lowerResponse.includes("what does the evidence tell us about treating") ||
-      lowerResponse.includes("evidence tell us about treating") ||
-      lowerResponse.includes("ready to move forward") ||
-      lowerResponse.includes("with mobility deficits confirmed") ||
-      lowerResponse.includes("classification confirmed") ||
-      (lowerResponse.includes("low irritability") && lowerResponse.includes("aggressive")) ||
-      (lowerResponse.includes("irritability established") && lowerResponse.includes("treatment"));
+      (lowerResponse.includes("acute stage") && lowerResponse.includes("intervention"));
 
-    // -------------------------------------------------------------------------
-    // Step 4 Complete: Case finished
-    // -------------------------------------------------------------------------
     const step4complete = 
-      // Original phrases
       lowerResponse.includes("successfully navigated") ||
       lowerResponse.includes("case summary") ||
       lowerResponse.includes("try another case") ||
       lowerResponse.includes("outstanding work! you've") ||
-      lowerResponse.includes("excellent clinical reasoning throughout") ||
-      // V2 phrases - these are what Sam actually says now
-      lowerResponse.includes("next case together") ||
-      lowerResponse.includes("looking forward to our next case") ||
-      lowerResponse.includes("worked through the entire clinical reasoning pathway") ||
-      lowerResponse.includes("worked through the entire") ||
-      lowerResponse.includes("you've earned that break") ||
-      lowerResponse.includes("see you soon for more practice") ||
-      lowerResponse.includes("rest up") ||
-      lowerResponse.includes("you should feel really proud") ||
-      lowerResponse.includes("you've done outstanding work navigating") ||
-      lowerResponse.includes("systematically navigated") ||
-      (lowerResponse.includes("try another case") || lowerResponse.includes("another case to practice")) ||
-      (lowerResponse.includes("complete") && lowerResponse.includes("clinical reasoning pathway"));
+      lowerResponse.includes("excellent clinical reasoning throughout");
 
-    // -------------------------------------------------------------------------
-    // Generic transition (fallback)
-    // -------------------------------------------------------------------------
     const genericTransition = 
       lowerResponse.includes("move on to the next clinical decision") ||
       lowerResponse.includes("ready to move on") ||
       lowerResponse.includes("let's proceed to the next");
 
-    // Determine if we should advance
-    const shouldAdvanceStep = 
-      (conversationState.currentStepNumber === 1 && step1to2) ||
-      (conversationState.currentStepNumber === 2 && step2to3) ||
-      (conversationState.currentStepNumber === 3 && step3to4) ||
-      (conversationState.currentStepNumber === 4 && step4complete) ||
-      genericTransition;
+    const shouldAdvanceStep = step1to2 || step2to3 || step3to4 || step4complete || genericTransition;
 
-    // =========================================================================
+    // -------------------------------------------------------------------------
     // UPDATE STEP TRACKING AND CAPTURE SELECTIONS
-    // =========================================================================
+    // -------------------------------------------------------------------------
 
     const newCurrentStep = shouldAdvanceStep && conversationState.currentStepNumber < pathwaySteps.length
       ? conversationState.currentStepNumber + 1
@@ -544,13 +492,11 @@ export async function POST(request: NextRequest) {
       ? [...conversationState.completedSteps, conversationState.currentStepNumber]
       : [...conversationState.completedSteps];
 
-    // Capture classification when transitioning from Step 2 to Step 3
     let newClassificationSelected = conversationState.classificationSelected;
     if (step2to3 && patientCase.expected_classification) {
       newClassificationSelected = patientCase.expected_classification;
     }
 
-    // Capture stage when transitioning from Step 3 to Step 4
     let newStageSelected = conversationState.stageSelected;
     if (step3to4 && patientCase.expected_stage) {
       newStageSelected = patientCase.expected_stage;
@@ -570,9 +516,9 @@ export async function POST(request: NextRequest) {
       stageSelected: newStageSelected,
     };
 
-    // =========================================================================
+    // =====================================================================
     // SAVE CONVERSATION TO DATABASE
-    // =========================================================================
+    // =====================================================================
     
     if (activeConversationId) {
       await supabase

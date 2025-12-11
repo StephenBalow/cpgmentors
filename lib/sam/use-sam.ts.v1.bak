@@ -4,9 +4,7 @@
 // A React hook that manages the conversation with Sam.
 // Handles state, API calls, and message history.
 // =============================================================================
-// VERSION HISTORY:
-// - December 9, 2025: Added conversation saving (conversationId tracking)
-// - December 10, 2025: V2 - Fixed resume behavior (no double messages)
+// UPDATED: December 9, 2025 - Added conversation saving (conversationId tracking)
 // =============================================================================
 
 import { useState, useCallback } from 'react';
@@ -16,7 +14,7 @@ import { DEMO_USER_ID } from '../constants/user';
 interface UseSamOptions {
   caseId: string;
   onError?: (error: string) => void;
-  onResume?: (fromStep: number) => void;  // NEW: Callback with step number
+  onResume?: () => void;  // NEW: Callback when resuming an existing conversation
 }
 
 interface UseSamReturn {
@@ -27,9 +25,8 @@ interface UseSamReturn {
   totalSteps: number;
   completedSteps: number[];
   resources: ExternalResource[];
-  conversationId: string | null;
-  isResumed: boolean;
-  resumedFromStep: number | null;  // NEW: Which step we resumed from
+  conversationId: string | null;  // NEW: Expose conversationId
+  isResumed: boolean;             // NEW: Whether we resumed an existing conversation
   
   // Actions
   startConversation: () => Promise<void>;
@@ -59,18 +56,16 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
   const [error, setError] = useState<string | null>(null);
   const [resources, setResources] = useState<ExternalResource[]>([]);
   
-  // Conversation tracking
+  // NEW: Track conversation ID for persistence
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isResumed, setIsResumed] = useState(false);
-  const [resumedFromStep, setResumedFromStep] = useState<number | null>(null);
 
   // Start a new conversation (gets Sam's opening message)
   // Or resume an existing in-progress conversation
   const startConversation = useCallback(async () => {
     setIsLoading(true);
     setError(null);
-    setIsResumed(false);
-    setResumedFromStep(null);
+    setIsResumed(false);  // Reset resume flag
 
     try {
       const response = await fetch('/api/sam/chat', {
@@ -81,7 +76,7 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
           userId: DEMO_USER_ID,
           message: '',
           conversationState: initialState,
-          conversationId: null,  // Always null on start - API checks for existing
+          conversationId: null,  // NEW: null on start - API will check for existing
           isFirstMessage: true,
         }),
       });
@@ -92,30 +87,18 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
 
       const data = await response.json();
       
-      // Store the conversation ID for future requests
+      // NEW: Store the conversation ID for future requests
       if (data.conversationId) {
         setConversationId(data.conversationId);
       }
       
-      // Handle resumed conversations
+      // NEW: Handle resumed conversations
       if (data.isResumed) {
         setIsResumed(true);
-        setResumedFromStep(data.resumedFromStep || 1);
-        onResume?.(data.resumedFromStep || 1);
-        
-        // ===============================================================
-        // FIX: When resuming, the API returns empty response string and
-        // the full message history in updatedState.messages. We just
-        // load that state directly - no new message to display.
-        // ===============================================================
-        setConversationState(data.updatedState);
-        
-        // Note: data.response will be empty string when resuming
-        // The messages array already contains the full conversation history
-      } else {
-        // New conversation - response contains the opening message
-        setConversationState(data.updatedState);
+        onResume?.();  // Notify parent component if needed
       }
+      
+      setConversationState(data.updatedState);
       
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
@@ -157,10 +140,10 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseId,
-          userId: DEMO_USER_ID,
+          userId: DEMO_USER_ID,  // NEW: Include userId
           message,
           conversationState: stateWithUserMessage,
-          conversationId,
+          conversationId,  // NEW: Include conversationId for persistence
           isFirstMessage: false,
         }),
       });
@@ -171,7 +154,7 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
 
       const data = await response.json();
       
-      // Update conversationId if returned (shouldn't change, but be safe)
+      // NEW: Update conversationId if returned (shouldn't change, but be safe)
       if (data.conversationId) {
         setConversationId(data.conversationId);
       }
@@ -196,13 +179,11 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
   }, [caseId, conversationState, conversationId, onError]);
 
   // Reset the conversation
-  // This clears local state but does NOT affect the database
-  // The in-progress conversation will still be there to resume
+  // NEW: Also resets conversationId so next start creates fresh conversation
   const reset = useCallback(() => {
     setConversationState(initialState);
-    setConversationId(null);
-    setIsResumed(false);
-    setResumedFromStep(null);
+    setConversationId(null);  // NEW: Clear conversation ID
+    setIsResumed(false);      // NEW: Clear resumed flag
     setError(null);
     setResources([]);
   }, []);
@@ -225,9 +206,8 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
     totalSteps: conversationState.totalSteps,
     completedSteps: conversationState.completedSteps,
     resources,
-    conversationId,
-    isResumed,
-    resumedFromStep,
+    conversationId,  // NEW: Expose for debugging/display if needed
+    isResumed,       // NEW: Expose so UI can show "Resuming..." message
     
     startConversation,
     sendMessage,
