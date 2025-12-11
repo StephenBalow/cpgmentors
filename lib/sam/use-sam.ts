@@ -7,16 +7,17 @@
 // VERSION HISTORY:
 // - December 9, 2025: Added conversation saving (conversationId tracking)
 // - December 10, 2025: V2 - Fixed resume behavior (no double messages)
+// - December 11, 2025: V3 - Uses real auth user instead of DEMO_USER_ID
 // =============================================================================
 
 import { useState, useCallback } from 'react';
+import { useAuth } from '@/lib/hooks/use-auth';
 import type { ConversationState, Message, ExternalResource } from '@/lib/sam/system-prompt';
-import { DEMO_USER_ID } from '../constants/user';
 
 interface UseSamOptions {
   caseId: string;
   onError?: (error: string) => void;
-  onResume?: (fromStep: number) => void;  // NEW: Callback with step number
+  onResume?: (fromStep: number) => void;
 }
 
 interface UseSamReturn {
@@ -29,7 +30,7 @@ interface UseSamReturn {
   resources: ExternalResource[];
   conversationId: string | null;
   isResumed: boolean;
-  resumedFromStep: number | null;  // NEW: Which step we resumed from
+  resumedFromStep: number | null;
   
   // Actions
   startConversation: () => Promise<void>;
@@ -54,6 +55,7 @@ const initialState: ConversationState = {
 };
 
 export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamReturn {
+  const { userId } = useAuth();
   const [conversationState, setConversationState] = useState<ConversationState>(initialState);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +69,11 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
   // Start a new conversation (gets Sam's opening message)
   // Or resume an existing in-progress conversation
   const startConversation = useCallback(async () => {
+    if (!userId) {
+      onError?.('Not authenticated');
+      return;
+    }
+
     setIsLoading(true);
     setError(null);
     setIsResumed(false);
@@ -78,10 +85,10 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseId,
-          userId: DEMO_USER_ID,
+          userId,  // Now uses real auth user!
           message: '',
           conversationState: initialState,
-          conversationId: null,  // Always null on start - API checks for existing
+          conversationId: null,
           isFirstMessage: true,
         }),
       });
@@ -103,15 +110,9 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
         setResumedFromStep(data.resumedFromStep || 1);
         onResume?.(data.resumedFromStep || 1);
         
-        // ===============================================================
-        // FIX: When resuming, the API returns empty response string and
-        // the full message history in updatedState.messages. We just
-        // load that state directly - no new message to display.
-        // ===============================================================
+        // When resuming, the API returns empty response string and
+        // the full message history in updatedState.messages
         setConversationState(data.updatedState);
-        
-        // Note: data.response will be empty string when resuming
-        // The messages array already contains the full conversation history
       } else {
         // New conversation - response contains the opening message
         setConversationState(data.updatedState);
@@ -124,11 +125,15 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
     } finally {
       setIsLoading(false);
     }
-  }, [caseId, onError, onResume]);
+  }, [caseId, userId, onError, onResume]);
 
   // Send a message to Sam
   const sendMessage = useCallback(async (message: string) => {
     if (!message.trim()) return;
+    if (!userId) {
+      onError?.('Not authenticated');
+      return;
+    }
 
     setIsLoading(true);
     setError(null);
@@ -142,7 +147,6 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
     };
 
     // Build the state with user message included
-    // This is what we send to the API
     const stateWithUserMessage: ConversationState = {
       ...conversationState,
       messages: [...conversationState.messages, userMessage],
@@ -157,7 +161,7 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           caseId,
-          userId: DEMO_USER_ID,
+          userId,  // Now uses real auth user!
           message,
           conversationState: stateWithUserMessage,
           conversationId,
@@ -171,7 +175,7 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
 
       const data = await response.json();
       
-      // Update conversationId if returned (shouldn't change, but be safe)
+      // Update conversationId if returned
       if (data.conversationId) {
         setConversationId(data.conversationId);
       }
@@ -193,11 +197,9 @@ export function useSam({ caseId, onError, onResume }: UseSamOptions): UseSamRetu
     } finally {
       setIsLoading(false);
     }
-  }, [caseId, conversationState, conversationId, onError]);
+  }, [caseId, userId, conversationState, conversationId, onError]);
 
   // Reset the conversation
-  // This clears local state but does NOT affect the database
-  // The in-progress conversation will still be there to resume
   const reset = useCallback(() => {
     setConversationState(initialState);
     setConversationId(null);

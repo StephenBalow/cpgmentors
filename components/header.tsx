@@ -4,6 +4,7 @@ import { ChevronRight } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import Link from 'next/link';
 import { useBreadcrumbs } from '@/components/breadcrumb-context';
+import { UserMenu } from './user-menu';
 
 interface HeaderProps {
   userInitials?: string;
@@ -44,13 +45,7 @@ export function Header({ userInitials = 'JD' }: HeaderProps) {
       </nav>
 
       {/* User Avatar */}
-      <Link href="/profile">
-        <Avatar className="h-8 w-8 cursor-pointer transition-opacity hover:opacity-80">
-          <AvatarFallback className="bg-primary text-xs font-medium text-primary-foreground">
-            {userInitials}
-          </AvatarFallback>
-        </Avatar>
-      </Link>
+      <UserMenu />
     </header>
   );
 }
