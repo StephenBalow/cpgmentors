@@ -261,7 +261,7 @@ export default function ArtifactsPage() {
     try {
       const { error } = await supabase
         .from('user_conversations')
-        .update({ status: 'abandoned' })
+        .delete()
         .eq('id', artifact.id)
       
       if (error) throw error

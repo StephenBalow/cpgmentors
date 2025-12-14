@@ -411,6 +411,7 @@ export default function PracticeConversationPage() {
   const [loading, setLoading] = useState(true);
   const [inputValue, setInputValue] = useState('');
   const [showFullCase, setShowFullCase] = useState(false);
+  const [isStartingConversation, setIsStartingConversation] = useState(false);
   
   // Resource/Video state
   const [resourceCache, setResourceCache] = useState<Record<string, ResourceData>>({});
@@ -534,17 +535,19 @@ export default function PracticeConversationPage() {
     fetchData();
   }, [caseId]);
 
-  // Start conversation when data is loaded
+  // Start conversation when data is loaded (with race condition guard)
   useEffect(() => {
     if (
       !loading &&
       patientCase &&
       pathwaySteps.length > 0 &&
-      messages.length === 0
+      messages.length === 0 &&
+      !isStartingConversation
     ) {
+      setIsStartingConversation(true);
       startConversation();
     }
-  }, [loading, patientCase, pathwaySteps, messages.length, startConversation]);
+  }, [loading, patientCase, pathwaySteps, messages.length, startConversation, isStartingConversation]);
 
   // Set breadcrumbs
   useEffect(() => {
